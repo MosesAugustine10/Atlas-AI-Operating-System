@@ -1,0 +1,101 @@
+# Atlas AI Operating System - Core Configuration
+# This file defines system-wide settings that govern how Atlas operates.
+
+system:
+  name: Atlas
+  version: 0.1.0
+  description: "AI Operating System providing persistent identity, memory, knowledge, and governed tooling."
+  environment: development
+
+identity:
+  source: atlas/core/Identity.md
+  reload_on_start: true
+
+principles:
+  source: atlas/core/Principles.md
+  enforce: true
+
+# ---------------------------------------------------------------------------
+# Memory
+# Persistent context across sessions. Each layer has a defined cadence and role.
+# ---------------------------------------------------------------------------
+memory:
+  root: atlas/memory
+  layers:
+    conversations:
+      path: conversations
+      purpose: "Logs and summaries of meaningful interactions."
+    daily:
+      path: daily
+      purpose: "Day-by-day record of work, decisions, and deferrals."
+    weekly:
+      path: weekly
+      purpose: "Weekly reviews consolidating daily entries."
+    monthly:
+      path: monthly
+      purpose: "Monthly retrospectives and planning summaries."
+    ideas:
+      path: ideas
+      purpose: "Backlog of concepts and proposals worth revisiting."
+  policy:
+    append_first: true        # Prefer logging new entries over rewriting history.
+    retention: indefinite      # Memory is preserved unless explicitly archived.
+
+# ---------------------------------------------------------------------------
+# Knowledge
+# Curated reference material organized by domain, backed by vector storage.
+# ---------------------------------------------------------------------------
+knowledge:
+  root: atlas/knowledge
+  vector_store:
+    type: chroma
+    path: ../Database/Chroma
+  embeddings:
+    path: ../Database/Embeddings
+  domains:
+    - ai
+    - blender
+    - books
+    - github
+    - linkedin
+    - manuals
+    - mining
+    - papers
+    - programming
+    - standards
+    - youtube
+  retrieval:
+    default_top_k: 5
+    min_relevance: 0.70
+
+# ---------------------------------------------------------------------------
+# Workflows
+# Named, repeatable processes Atlas can invoke.
+# ---------------------------------------------------------------------------
+workflows:
+  root: atlas/workflows
+  registry: []   # Populated as workflows are defined.
+
+# ---------------------------------------------------------------------------
+# Prompts
+# Reusable templates that produce consistent results.
+# ---------------------------------------------------------------------------
+prompts:
+  root: atlas/prompts
+  registry: []   # Populated as prompts are defined.
+
+# ---------------------------------------------------------------------------
+# Tools
+# Controlled capabilities. Tools are disabled unless explicitly enabled.
+# ---------------------------------------------------------------------------
+tools:
+  root: atlas/tools
+  policy: allowlist
+  enabled: []    # Populated as tools are reviewed and approved.
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging:
+  level: info                # trace | debug | info | warn | error
+  store: atlas/memory/conversations

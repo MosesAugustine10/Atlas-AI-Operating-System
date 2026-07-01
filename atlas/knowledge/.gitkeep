@@ -1,0 +1,2 @@
+# Curated reference material and retrieval configuration.
+# Backed by vector storage in Database/Chroma and Database/Embeddings.
