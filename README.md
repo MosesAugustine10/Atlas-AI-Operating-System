@@ -36,7 +36,22 @@ atlas/
 ├── knowledge/     # Curated reference material and retrieval config
 ├── workflows/     # Repeatable, named processes
 ├── prompts/       # Reusable prompt templates
-├── tools/         # Controlled tool library
+├── tools/         # Tool System (registry, manager, permissions, adapters, services)
+│   ├── base.py        # Abstract BaseTool contract
+│   ├── registry.py    # Tool catalog with lookup by name
+│   ├── manager.py     # Permission-gated dispatch gateway
+│   ├── permissions.py # DENY/USE/CONFIGURE/ADMIN permission model
+│   ├── result.py      # ToolResult dataclass (success/error/metadata)
+│   ├── adapters/      # Connectors to external systems
+│   │   ├── github.py      # GitHub API adapter
+│   │   ├── filesystem.py  # Filesystem adapter
+│   │   ├── browser.py     # Browser automation adapter
+│   │   └── blender.py     # Blender 3D adapter
+│   └── services/      # Domain logic wrappers
+│       ├── github.py      # GitHub domain service
+│       ├── filesystem.py  # Filesystem domain service
+│       ├── browser.py     # Browser domain service
+│       └── blender.py     # Blender domain service
 └── configs/       # System configuration files
 
 docs/              # Architecture and design documentation
@@ -91,6 +106,91 @@ flowchart LR
 | `State` | Represents the current execution phase and history. |
 | `Context` | Carries request + memory + knowledge + config through the pipeline. |
 | `Session` | Tracks one execution from start to finish. |
+
+
+## Atlas Tool Layer
+
+The Tool Layer is the controlled gateway through which agents invoke external capabilities. It is built on a three-tier architecture: **tools** (what agents call) sit on top of **services** (domain logic) which are connected to the outside world by **adapters** (transports / MCP connectors). Every call passes through a permission gate before reaching the underlying service.
+
+### Architecture
+
+```mermaid
+flowchart TB
+    subgraph Kernel["Kernel"]
+        Agent["Agent"]
+    end
+
+    subgraph ToolLayer["Tool Layer"]
+        Manager["ToolManager"]
+        Registry["ToolRegistry"]
+        Permissions["Permissions"]
+
+        subgraph Tools["Tools"]
+            T1["Tool A"]
+            T2["Tool B"]
+        end
+    end
+
+    subgraph Services["Services"]
+        S_GH["GitHub Service"]
+        S_FS["Filesystem Service"]
+        S_BR["Browser Service"]
+        S_BL["Blender Service"]
+    end
+
+    subgraph Adapters["Adapters"]
+        A_GH["GitHub Adapter"]
+        A_FS["Filesystem Adapter"]
+        A_BR["Browser Adapter"]
+        A_BL["Blender Adapter"]
+    end
+
+    subgraph External["External"]
+        GH["GitHub API"]
+        FS["Local Files"]
+        BR["Headless Browser"]
+        BL["Blender Instance"]
+    end
+
+    Agent -->|calls| Manager
+    Manager -->|checks| Permissions
+    Manager -->|looks up| Registry
+    Registry -->|returns| T1
+    Registry -->|returns| T2
+    T1 --> S_GH
+    T2 --> S_FS
+    S_GH --> A_GH
+    S_FS --> A_FS
+    S_BR --> A_BR
+    S_BL --> A_BL
+    A_GH --> GH
+    A_FS --> FS
+    A_BR --> BR
+    A_BL --> BL
+```
+
+### Component responsibility table
+
+| Component | Responsibility |
+|-----------|----------------|
+| `BaseTool` | Abstract contract every concrete tool implements (`name`, `execute`). |
+| `ToolResult` | Structured result carrying `success`, `output`, `error`, and `metadata`. |
+| `ToolRegistry` | Catalog of registered tools; lookup by name; duplicate prevention. |
+| `ToolManager` | Dispatch gateway; enforces permission checks before every invocation. |
+| `Permissions` | `DENY` / `USE` / `CONFIGURE` / `ADMIN` model with per-tool grants. |
+| `BaseService` | Abstract domain-logic wrapper (`connect`, `disconnect`, `is_connected`). |
+| `BaseAdapter` | Abstract transport connector bridging a service to an external system. |
+
+### Execution flow
+
+1. **Agent calls a tool by name** through the `ToolManager`.
+2. **Manager checks the `Permissions` model** — if the caller lacks the required level, a `ToolResult.fail` is returned immediately.
+3. **Manager looks up the tool in the `ToolRegistry`** — if the tool is not registered, a `ToolResult.fail` is returned.
+4. **Tool executes** against its `BaseService`, which holds the domain logic.
+5. **Service communicates through its `BaseAdapter`** to the external system (GitHub API, filesystem, browser, Blender) or an MCP server.
+6. **`ToolResult` flows back** through the manager to the agent and ultimately the Kernel.
+
+Every stage returns a `ToolResult`, so the pipeline is uniform whether the outcome is success, permission denial, unknown tool, or an unexpected exception.
 
 
 ## Getting Started
