@@ -24,7 +24,13 @@ Together, these form a coherent operating environment in which an AI can work wi
 
 ```
 atlas/
-├── core/          # Identity, principles, and foundational logic
+├── core/          # Kernel architecture + identity & principles
+│   ├── kernel.py      # Orchestrates every request end-to-end
+│   ├── planner.py     # Converts goals into executable tasks
+│   ├── router.py      # Selects the correct agent for each task
+│   ├── state.py       # Represents the current execution state
+│   ├── context.py     # Bundles request + memory + knowledge + config
+│   └── session.py     # Tracks one execution from start to finish
 ├── agents/        # Agent definitions and role configurations
 ├── memory/        # Persistent memory (conversations, daily, weekly, monthly)
 ├── knowledge/     # Curated reference material and retrieval config
@@ -36,6 +42,55 @@ atlas/
 docs/              # Architecture and design documentation
 tests/             # Validation and behavioral tests
 ```
+
+
+## Architecture Overview
+
+Atlas is built around a **Kernel** that orchestrates every request through a clean, stage-based pipeline. Each component has a single responsibility, and a shared **Context** object flows through the system so no component reaches into global state.
+
+### The request pipeline
+
+A user request enters the system and is routed through the following stages:
+
+1. **Kernel** — the orchestrator. It receives the raw request, builds a `Context`, opens a `Session`, and drives the pipeline.
+2. **Planner** — decomposes the goal into an ordered list of executable `Task` objects.
+3. **Router** — examines each task and selects the agent best suited to execute it.
+4. **Agent** — carries out the assigned task using its specialized capabilities.
+5. **Tool Manager** — the controlled gateway through which agents invoke external capabilities (filesystem, web, code execution, etc.).
+6. **MCP Servers** — the external services that fulfill tool calls (Model Context Protocol servers, APIs, databases, etc.).
+
+Two cross-cutting concerns support every stage:
+- **Context** — bundles the user request, configuration, memory, and knowledge handles into one object passed through the system.
+- **State** — tracks the lifecycle phase of the request (`pending → planning → routing → executing → reviewing → completed`).
+
+### Pipeline diagram
+
+```mermaid
+flowchart LR
+    User([User]) --> Kernel
+    Kernel --> Planner
+    Planner -->|tasks| Router
+    Router -->|assigns| Agent
+    Agent --> ToolMgr[Tool Manager]
+    ToolMgr --> MCP[MCP Servers]
+    MCP -.->|results| Agent
+    Agent -.->|report| Kernel
+
+    Memory[(Memory)] -.-> Kernel
+    Knowledge[(Knowledge)] -.-> Kernel
+    Config[(Config)] -.-> Kernel
+```
+
+### Kernel components at a glance
+
+| Component | Responsibility |
+|-----------|----------------|
+| `Kernel` | Orchestrates every request from intake to completion. |
+| `Planner` | Converts a goal into a sequence of executable `Task` objects. |
+| `Router` | Chooses the correct agent for each task. |
+| `State` | Represents the current execution phase and history. |
+| `Context` | Carries request + memory + knowledge + config through the pipeline. |
+| `Session` | Tracks one execution from start to finish. |
 
 
 ## Getting Started
