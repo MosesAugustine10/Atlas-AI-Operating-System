@@ -32,7 +32,16 @@ atlas/
 │   ├── context.py     # Bundles request + memory + knowledge + config
 │   └── session.py     # Tracks one execution from start to finish
 ├── agents/        # Agent definitions and role configurations
-├── memory/        # Persistent memory (conversations, daily, weekly, monthly)
+├── memory/        # Memory Engine (5 stores + engine + storage interface)
+│   ├── engine.py      # Orchestrates all memory stores
+│   ├── base.py        # Abstract BaseMemory contract
+│   ├── models.py      # MemoryEntry, MemoryQuery, MemoryCategory, MemoryPriority
+│   ├── storage.py     # Abstract persistence backend interface
+│   ├── working.py     # Short-lived task-scoped scratch space
+│   ├── episodic.py    # Chronological log of past experiences
+│   ├── semantic.py    # Long-term knowledge and factual recall
+│   ├── procedural.py  # Procedures, workflows, and methods
+│   └── reflection.py  # Self-assessment and meta-cognition
 ├── knowledge/     # Curated reference material and retrieval config
 ├── workflows/     # Repeatable, named processes
 ├── prompts/       # Reusable prompt templates
@@ -191,6 +200,83 @@ flowchart TB
 6. **`ToolResult` flows back** through the manager to the agent and ultimately the Kernel.
 
 Every stage returns a `ToolResult`, so the pipeline is uniform whether the outcome is success, permission denial, unknown tool, or an unexpected exception.
+
+
+## Atlas Memory Engine
+
+The Memory Engine gives Atlas five specialised memory stores — each modelled after a distinct cognitive function — orchestrated by a single `MemoryEngine`. Every store implements the `BaseMemory` contract and can optionally be backed by a swappable `MemoryStorage` persistence layer. The engine provides a high-level `remember` / `recall` / `forget` API so the Kernel never needs to know which store it is addressing.
+
+### Memory hierarchy
+
+| Store | Analogy | Retention | Purpose |
+|-------|---------|-----------|---------|
+| **Working** | Scratchpad | Session-scoped, evicts at capacity | Holds the immediate context for the current task. |
+| **Episodic** | Journal | Permanent, append-first | Chronological log of conversations, events, and daily entries. |
+| **Semantic** | Encyclopedia | Permanent | Long-term facts, domain knowledge, and reference material. |
+| **Procedural** | Playbook | Permanent | Workflows, methods, and step-by-step procedures. |
+| **Reflection** | Mirror | Permanent, newest-first | Self-assessments, lessons learned, and improvement notes. |
+
+### Architecture
+
+```mermaid
+flowchart TB
+    subgraph Kernel["Kernel"]
+        KAPI["remember / recall / forget"]
+    end
+
+    subgraph Engine["MemoryEngine"]
+        KAPI --> WM["WorkingMemory"]
+        KAPI --> EM["EpisodicMemory"]
+        KAPI --> SM["SemanticMemory"]
+        KAPI --> PM["ProceduralMemory"]
+        KAPI --> RM["ReflectionMemory"]
+    end
+
+    subgraph Interface["BaseMemory contract"]
+        Store["store()"]
+        Retrieve["retrieve()"]
+        Query["query()"]
+        Delete["delete()"]
+    end
+
+    subgraph Persistence["Storage Layer"]
+        Storage["MemoryStorage"]
+        DB[("Database / Files")]
+    end
+
+    WM --> Store
+    EM --> Store
+    SM --> Store
+    PM --> Store
+    RM --> Store
+    Store --> Storage
+    Storage --> DB
+```
+
+### Component table
+
+| Component | Responsibility |
+|-----------|----------------|
+| `MemoryEngine` | High-level orchestrator owning all five stores; exposes `remember`, `recall`, `forget`. |
+| `BaseMemory` | Abstract contract (`store`, `retrieve`, `query`, `delete`) every store implements. |
+| `WorkingMemory` | Fast, bounded scratch space with automatic eviction at capacity. |
+| `EpisodicMemory` | Append-only chronological log with `recent()` for newest-first access. |
+| `SemanticMemory` | Long-term knowledge store (tag and text search; future vector embedding support). |
+| `ProceduralMemory` | Procedure and workflow repository (tag and text search). |
+| `ReflectionMemory` | Self-assessment store with `lessons()` helper for retrospective queries. |
+| `MemoryEntry` | Dataclass: `id`, `category`, `content`, `source`, `tags`, `priority`, `timestamp`. |
+| `MemoryQuery` | Structured query: `text`, `tags`, `category`, `since`, `until`, `limit`. |
+| `MemoryStorage` | Abstract persistence backend (swappable: SQLite, filesystem, PostgreSQL, etc.). |
+
+### Execution lifecycle
+
+1. **Kernel calls `engine.remember(content, category, tags)`** — the engine delegates to the appropriate store.
+2. **Store creates a `MemoryEntry`** with a unique id, timestamp, and category.
+3. **If a `MemoryStorage` is configured**, the entry is also persisted to the storage backend.
+4. **On recall**, the engine queries the specified store (or all stores) and returns matching `MemoryEntry` objects ordered by timestamp.
+5. **On forget**, the engine removes the entry from the store and from storage.
+
+Every store can operate purely in-memory when no storage backend is injected, making the system immediately testable and usable without external dependencies.
 
 
 ## Getting Started
