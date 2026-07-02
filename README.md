@@ -42,7 +42,18 @@ atlas/
 │   ├── semantic.py    # Long-term knowledge and factual recall
 │   ├── procedural.py  # Procedures, workflows, and methods
 │   └── reflection.py  # Self-assessment and meta-cognition
-├── knowledge/     # Curated reference material and retrieval config
+├── knowledge/     # Knowledge Engine (ingest, chunk, embed, retrieve)
+│   ├── engine.py      # Orchestrates ingestion & retrieval pipeline
+│   ├── base.py        # Abstract KnowledgeStore contract
+│   ├── models.py      # KnowledgeDocument, KnowledgeChunk, KnowledgeQuery, KnowledgeResult
+│   ├── storage.py     # Abstract persistence backend interface
+│   ├── store.py       # InMemoryKnowledgeStore (concrete)
+│   ├── loader.py      # Document loader (TXT, Markdown, PDF placeholder)
+│   ├── parser.py      # Text extractor (plain, Markdown, future PDF/HTML)
+│   ├── chunker.py     # Text chunker with configurable size & overlap
+│   ├── embeddings.py  # Embedding model + HashingEmbedder placeholder
+│   ├── vectorstore.py # InMemoryVectorStore (brute-force cosine search)
+│   └── retriever.py   # Query → Embed → Search → Top-K pipeline
 ├── workflows/     # Repeatable, named processes
 ├── prompts/       # Reusable prompt templates
 ├── tools/         # Tool System (registry, manager, permissions, adapters, services)
@@ -277,6 +288,90 @@ flowchart TB
 5. **On forget**, the engine removes the entry from the store and from storage.
 
 Every store can operate purely in-memory when no storage backend is injected, making the system immediately testable and usable without external dependencies.
+
+
+## Atlas Knowledge Engine
+
+The Knowledge Engine is Atlas's document intelligence pipeline. It ingests raw documents, parses them into clean text, splits them into chunks, generates embeddings, indexes them in a vector store, and retrieves the most relevant chunks for any given query. Every stage is dependency-injected so the engine can be upgraded (e.g. HashingEmbedder → OpenAI, InMemoryVectorStore → Chroma) without changing pipeline code.
+
+### Architecture
+
+```mermaid
+flowchart TB
+    subgraph Input["Input"]
+        Doc[Document]
+    end
+
+    subgraph Ingestion["Ingestion Pipeline"]
+        Loader["DocumentLoader"]
+        Parser["DocumentParser"]
+        Chunker["TextChunker"]
+        Embeddings["EmbeddingModel"]
+    end
+
+    subgraph Indexing["Indexing"]
+        VS["InMemoryVectorStore"]
+    end
+
+    subgraph Retrieval["Retrieval Pipeline"]
+        Query[KnowledgeQuery]
+        Retriever["Retriever"]
+    end
+
+    subgraph Output["Output"]
+        Results["KnowledgeResult[]"]
+    end
+
+    Doc --> Loader
+    Loader --> Parser
+    Parser --> Chunker
+    Chunker --> Embeddings
+    Embeddings --> VS
+    Query --> Embeddings
+    Embeddings --> Retriever
+    VS --> Retriever
+    Retriever --> Results
+```
+
+### Component table
+
+| Component | Responsibility |
+|-----------|----------------|
+| `KnowledgeEngine` | Top-level orchestrator. Public API: `ingest()`, `search()`, `remove()`, `count()`. |
+| `DocumentLoader` | Reads files (TXT, Markdown) or raw text → `KnowledgeDocument`. |
+| `DocumentParser` | Extracts clean text from documents (strips Markdown noise). |
+| `TextChunker` | Splits documents into overlapping `KnowledgeChunk` objects. |
+| `EmbeddingModel` | Abstract contract for embedding text → vectors. |
+| `HashingEmbedder` | Deterministic placeholder embedder for testing. |
+| `InMemoryVectorStore` | Brute-force cosine similarity search over chunk embeddings. |
+| `InMemoryKnowledgeStore` | Concrete store holding documents, chunks, and embeddings. |
+| `Retriever` | Query → Embed → Vector Search → Tag/Score Filter → Top-K. |
+| `KnowledgeStorage` | Abstract persistence backend (swappable). |
+
+### Execution lifecycle
+
+**Ingestion:**
+1. **Load** — `DocumentLoader` reads a file or accepts raw text, producing a `KnowledgeDocument`.
+2. **Parse** — `DocumentParser` extracts clean text, stripping formatting noise.
+3. **Chunk** — `TextChunker` splits the text into overlapping chunks of configurable size.
+4. **Embed** — `EmbeddingModel` converts each chunk into a vector.
+5. **Index** — `InMemoryVectorStore` stores the embeddings for retrieval.
+
+**Retrieval:**
+1. **Query** — A `KnowledgeQuery` with text, optional tags, and `top_k`.
+2. **Embed** — The query text is embedded into the same vector space as the chunks.
+3. **Search** — Cosine similarity finds the closest chunks in the vector store.
+4. **Filter** — Results are filtered by required tags and minimum score.
+5. **Return** — Up to `top_k` `KnowledgeResult` objects, each pairing a chunk with its parent document and a relevance score.
+
+### Future backends
+
+The `InMemoryVectorStore` is the default for testing and small datasets. It can be replaced with production-grade backends that implement the same interface:
+
+- **Chroma** — local vector database with built-in embedding support
+- **FAISS** — Facebook's efficient similarity search library
+- **Qdrant** — high-performance vector search engine
+- **Milvus** — scalable vector database for production workloads
 
 
 ## Getting Started
