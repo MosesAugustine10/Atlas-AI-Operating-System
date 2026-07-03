@@ -32,6 +32,21 @@ atlas/
 │   ├── context.py     # Bundles request + memory + knowledge + config
 │   └── session.py     # Tracks one execution from start to finish
 ├── agents/        # Agent definitions and role configurations
+├── providers/     # Provider Layer (LLM abstraction + routing + 9 providers)
+│   ├── manager.py     # High-level facade: generate/chat/complete/health
+│   ├── router.py      # Selects provider (auto/manual/fallback/round_robin)
+│   ├── registry.py    # Catalog of providers with duplicate detection
+│   ├── base.py        # Abstract BaseProvider contract
+│   ├── models.py      # ProviderRequest, ProviderResponse, ProviderInfo
+│   ├── openai.py      # OpenAI placeholder
+│   ├── anthropic.py   # Anthropic placeholder
+│   ├── gemini.py      # Google Gemini placeholder
+│   ├── groq.py        # Groq placeholder
+│   ├── nvidia.py      # NVIDIA NIM placeholder
+│   ├── openrouter.py  # OpenRouter placeholder
+│   ├── ollama.py      # Ollama (local) placeholder
+│   ├── lmstudio.py    # LM Studio (local) placeholder
+│   └── zai.py         # ZAI (built-in) placeholder
 ├── memory/        # Memory Engine (5 stores + engine + storage interface)
 │   ├── engine.py      # Orchestrates all memory stores
 │   ├── base.py        # Abstract BaseMemory contract
@@ -372,6 +387,86 @@ The `InMemoryVectorStore` is the default for testing and small datasets. It can 
 - **FAISS** — Facebook's efficient similarity search library
 - **Qdrant** — high-performance vector search engine
 - **Milvus** — scalable vector database for production workloads
+
+
+## Atlas Provider Layer
+
+The Provider Layer abstracts every LLM behind a single interface so Atlas can dynamically switch between providers without changing business logic. Each provider implements the `BaseProvider` contract; the `ProviderManager` exposes a high-level API (`generate`, `chat`, `complete`) that routes to the right provider via the `ProviderRouter` and `ProviderRegistry`.
+
+### Provider abstraction
+
+Every provider — whether a cloud giant (OpenAI, Anthropic) or a local runtime (Ollama, LM Studio) — implements the same four methods: `generate`, `stream`, `health`, `available_models`. This means Atlas's business logic is **provider-agnostic**: the Kernel never knows or cares which model produced a response. Swapping providers is a config change, not a code change.
+
+### Architecture
+
+```mermaid
+flowchart TB
+    subgraph Kernel["Kernel / Agents"]
+        Call["generate() / chat() / complete()"]
+    end
+
+    subgraph Manager["ProviderManager"]
+        Facade["High-level API"]
+    end
+
+    subgraph Routing["Routing"]
+        Router["ProviderRouter"]
+        Registry["ProviderRegistry"]
+    end
+
+    subgraph Providers["Provider Layer"]
+        ZAI["ZAI<br/>built-in"]
+        OAI["OpenAI"]
+        ANT["Anthropic"]
+        GEM["Gemini"]
+        GRQ["Groq"]
+        NVI["NVIDIA NIM"]
+        ORT["OpenRouter"]
+        OLL["Ollama<br/>local"]
+        LMS["LM Studio<br/>local"]
+    end
+
+    Call --> Facade
+    Facade --> Router
+    Router --> Registry
+    Router --> ZAI
+    Router --> OAI
+    Router --> ANT
+    Router --> GEM
+    Router --> GRQ
+    Router --> NVI
+    Router --> ORT
+    Router --> OLL
+    Router --> LMS
+```
+
+### Component table
+
+| Component | Responsibility |
+|-----------|----------------|
+| `ProviderManager` | High-level facade. Exposes `generate`, `chat`, `complete`, `health`, `list_models`. Depends only on the Router. |
+| `ProviderRouter` | Selects the correct provider. Strategies: `auto`, `manual`, `fallback`, `round_robin`. Filters by availability, priority, capabilities. |
+| `ProviderRegistry` | Catalog of providers. Supports `register`, `unregister`, `get`, `contains`, `names`, `default`. Duplicate detection via `ValueError`. |
+| `BaseProvider` | Abstract contract every provider implements: `generate`, `stream`, `health`, `available_models`, `name`. |
+| `ProviderInfo` | Static metadata: name, display name, base URL, priority, cost, capabilities. |
+| `ProviderCapability` | Declares streaming, tools, images, system-prompt support. |
+| `ProviderRequest` | Immutable request: prompt, messages, model, temperature, max_tokens, tools, images, streaming, metadata, UUID, timestamp. |
+| `ProviderResponse` | Immutable response: text, model, provider, finish_reason, usage, metadata, UUID, timestamp. |
+
+### Routing
+
+The router supports four strategies, all of which respect availability and capability requirements:
+
+- **`auto`** — picks the available provider with the lowest `priority` number. Default strategy.
+- **`manual`** — uses an explicitly named provider; returns `None` if unavailable.
+- **`fallback`** — tries a list of provider names in order, returning the first available one.
+- **`round_robin`** — rotates through eligible providers, distributing load evenly.
+
+**Fallback example:** if the default provider goes down, the manager automatically routes to the next available provider in the registry — the caller sees no error. This is what makes Atlas resilient: a provider outage degrades gracefully rather than failing the request.
+
+### Future local AI
+
+Two providers — **Ollama** and **LM Studio** — are designed for fully local execution. They run models on the user's own hardware with zero per-token cost and no data leaving the machine. The Provider Layer treats them identically to cloud providers, so Atlas can operate in a **fully air-gapped mode** by registering only local providers. This is foundational to Atlas's commitment to operator sovereignty: the choice of where intelligence runs belongs to the operator, not the platform.
 
 
 ## Getting Started
