@@ -31,6 +31,19 @@ atlas/
 │   ├── state.py       # Represents the current execution state
 │   ├── context.py     # Bundles request + memory + knowledge + config
 │   └── session.py     # Tracks one execution from start to finish
+├── runtime/       # Runtime Engine (execution heart of Atlas)
+│   ├── runtime.py     # Top-level Runtime orchestrator (handle/submit/pause/retry)
+│   ├── dispatcher.py  # Pulls requests off the queue and runs pipelines
+│   ├── pipeline.py    # Ordered stages: Planning -> Dispatch -> Execution -> Review -> Complete
+│   ├── executor.py    # PlaceholderExecutor with deterministic built-in actions
+│   ├── lifecycle.py   # RuntimeState lifecycle enum and transition table
+│   ├── events.py      # EventBus + 22 lifecycle event types
+│   ├── hooks.py       # Pre/post stage hooks with short-circuit and abort
+│   ├── telemetry.py   # TelemetryCollector (per-execution metrics)
+│   ├── monitor.py     # SystemMonitor (health snapshots)
+│   ├── recovery.py    # RecoveryManager (retry + compensation)
+│   ├── scheduler.py   # RuntimeScheduler (one_time / interval / cron)
+│   └── queue.py       # Priority-ordered ExecutionQueue
 ├── agents/        # Agent definitions and role configurations
 ├── providers/     # Provider Layer (LLM abstraction + routing + 9 providers)
 │   ├── manager.py     # High-level facade: generate/chat/complete/health
@@ -151,6 +164,346 @@ flowchart LR
 | `State` | Represents the current execution phase and history. |
 | `Context` | Carries request + memory + knowledge + config through the pipeline. |
 | `Session` | Tracks one execution from start to finish. |
+
+
+## Atlas Runtime Engine
+
+The Runtime Engine is the execution heart of the Atlas AI Operating System. It accepts user requests, builds an execution context, opens a session, dispatches workflows and agents, executes steps, selects providers, invokes tools, emits lifecycle events, updates the Memory and Knowledge engines, triggers Reflection, and returns the final response. Every concrete concern is injected through an abstract base class, so the runtime is **provider-agnostic**, **tool-agnostic**, **agent-agnostic**, and **workflow-agnostic**. The default configuration uses deterministic in-memory placeholders so the runtime works out-of-the-box with zero external dependencies.
+
+### Architecture
+
+```mermaid
+flowchart TB
+    User([User]) --> Runtime
+
+    subgraph Runtime["Runtime"]
+        Handle["handle() / submit()"]
+        Queue["ExecutionQueue"]
+        Dispatcher["Dispatcher"]
+        Pipeline["Pipeline"]
+        Executor["PlaceholderExecutor"]
+        Bus["EventBus"]
+        Hooks["HookManager"]
+        Telemetry["TelemetryCollector"]
+        Monitor["SystemMonitor"]
+        Recovery["RecoveryManager"]
+        Scheduler["RuntimeScheduler"]
+    end
+
+    subgraph Stages["Pipeline Stages"]
+        S1["PlanningStage"]
+        S2["DispatchStage"]
+        S3["ExecutionStage"]
+        S4["ReviewStage"]
+        S5["CompleteStage"]
+    end
+
+    subgraph Engines["Atlas Engines (injected)"]
+        Memory[(Memory Engine)]
+        Knowledge[(Knowledge Engine)]
+        Providers[(Provider Layer)]
+        Tools[(Tool System)]
+        Agents[(Agents)]
+        Workflows[(Workflow Engine)]
+    end
+
+    Handle --> Queue
+    Queue --> Dispatcher
+    Dispatcher --> Pipeline
+    Pipeline --> S1
+    S1 --> S2
+    S2 --> S3
+    S3 --> Executor
+    S3 --> S4
+    S4 --> S5
+    S5 --> User
+
+    Pipeline -.->|events| Bus
+    Bus -.-> Telemetry
+    Bus -.-> Recovery
+    Telemetry --> Monitor
+    Scheduler -.->|enqueue| Queue
+
+    S2 -.->|select| Providers
+    S2 -.->|select| Agents
+    S2 -.->|select| Workflows
+    S3 -.->|invoke| Tools
+    S3 -.->|update| Memory
+    S3 -.->|update| Knowledge
+    S4 -.->|trigger| Memory
+```
+
+### Runtime lifecycle
+
+Every execution moves through an explicit state machine. Transitions are validated against a fixed transition table; illegal moves raise `InvalidRuntimeTransitionError`. Terminal states cannot be left except that a `FAILED` execution can be retried (which resets the state to `PENDING`).
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING
+    PENDING --> PLANNING: handle
+    PENDING --> WAITING: schedule
+    PENDING --> PAUSED: pause
+    PENDING --> CANCELLED: cancel
+    PLANNING --> DISPATCHING: plan_ready
+    PLANNING --> WAITING: external_signal
+    PLANNING --> FAILED: plan_error
+    PLANNING --> CANCELLED: cancel
+    DISPATCHING --> EXECUTING: dispatched
+    DISPATCHING --> WAITING: external_signal
+    DISPATCHING --> FAILED: dispatch_error
+    DISPATCHING --> CANCELLED: cancel
+    EXECUTING --> PAUSED: pause
+    EXECUTING --> WAITING: wait_signal
+    EXECUTING --> REVIEWING: steps_done
+    EXECUTING --> COMPLETED: direct_complete
+    EXECUTING --> FAILED: step_failed
+    EXECUTING --> CANCELLED: cancel
+    REVIEWING --> COMPLETED: review_ok
+    REVIEWING --> FAILED: review_failed
+    REVIEWING --> EXECUTING: rework
+    REVIEWING --> CANCELLED: cancel
+    WAITING --> PLANNING: resume
+    WAITING --> DISPATCHING: resume
+    WAITING --> EXECUTING: resume
+    WAITING --> PAUSED: pause
+    WAITING --> CANCELLED: cancel
+    PAUSED --> PLANNING: resume
+    PAUSED --> EXECUTING: resume
+    PAUSED --> FAILED: abort
+    PAUSED --> CANCELLED: cancel
+    FAILED --> PENDING: retry
+    FAILED --> CANCELLED: abort
+    COMPLETED --> [*]
+    CANCELLED --> [*]
+```
+
+| State | Description | Terminal? |
+|-------|-------------|-----------|
+| `PENDING` | Execution created but not started. | No |
+| `PLANNING` | Planner is decomposing the goal. | No |
+| `DISPATCHING` | Dispatcher is selecting agents / providers / tools. | No |
+| `EXECUTING` | Executor is running steps. | No |
+| `REVIEWING` | Post-execution review / reflection is running. | No |
+| `WAITING` | Execution blocked on an external signal or schedule. | No |
+| `PAUSED` | Execution suspended; may be resumed. | No |
+| `COMPLETED` | Execution finished successfully. | Yes |
+| `FAILED` | Execution aborted with an error. Retriable. | Yes |
+| `CANCELLED` | Operator cancelled the execution. | Yes |
+
+### Execution pipeline
+
+The pipeline is composed of five default stages, each of which is a small, replaceable callable:
+
+```mermaid
+flowchart LR
+    Request[/"User request"/] --> Planning
+    subgraph Planning["PlanningStage"]
+        P1["Decompose goal"]
+        P2["Produce ExecutionPlan"]
+    end
+    Planning --> Dispatch
+    subgraph Dispatch["DispatchStage"]
+        D1["Select agents"]
+        D2["Select providers"]
+        D3["Select tools"]
+    end
+    Dispatch --> Execution
+    subgraph Execution["ExecutionStage"]
+        E1["Run plan via Executor"]
+        E2["Collect results"]
+    end
+    Execution --> Review
+    subgraph Review["ReviewStage"]
+        R1["Trigger Reflection"]
+        R2["Update Memory"]
+    end
+    Review --> Complete
+    subgraph Complete["CompleteStage"]
+        C1["Assemble response"]
+    end
+    Complete --> Response[/"Final response"/]
+```
+
+1. **PlanningStage** — Decomposes the user request into an `ExecutionPlan`. The default planner produces a single `noop` step; inject a custom planner for real decomposition.
+2. **DispatchStage** — Selects agents, providers, and tools. The default dispatcher is a no-op; inject a custom dispatcher to populate `context.artifacts`.
+3. **ExecutionStage** — Runs the `ExecutionPlan` via the injected `BaseExecutor`. Each step emits `StepStarted` / `StepCompleted` / `StepFailed` events.
+4. **ReviewStage** — Runs post-execution review / reflection. The default reviewer is a no-op; inject a custom reviewer to trigger reflection and update memory.
+5. **CompleteStage** — Assembles the final response from the execution outcome.
+
+### Component responsibilities
+
+| Component | Responsibility |
+|-----------|----------------|
+| `Runtime` | Top-level orchestrator. Public API: `handle`, `submit`, `drain`, `pause`, `resume`, `cancel`, `retry`, `register_schedule`, `tick`, `health`, `metrics`, `events`. |
+| `ExecutionQueue` | Priority-ordered FIFO queue of `ExecutionRequest` items. Higher priority dequeues first; FIFO within priority. Optional capacity. |
+| `Dispatcher` | Pulls requests off the queue and runs each through a fresh `Pipeline`. Tracks processed / failed counts. |
+| `Pipeline` | Ordered sequence of `Stage` callables. Runs hooks around every stage; short-circuits on error or `HookAbort`. |
+| `PlanningStage` | Decomposes the request into an `ExecutionPlan`. Emits `PlanningStarted` / `PlanningCompleted`. |
+| `DispatchStage` | Selects agents / providers / tools. Emits `DispatchStarted` / `DispatchCompleted`. |
+| `ExecutionStage` | Runs the plan via the `BaseExecutor`. Stores the `ExecutionOutcome` on the context. |
+| `ReviewStage` | Runs post-execution review / reflection. Emits `ReviewStarted` / `ReviewCompleted`. |
+| `CompleteStage` | Assembles the final response from the execution outcome. |
+| `BaseExecutor` | Abstract contract: `execute_plan(plan, execution_id, context) -> ExecutionOutcome`. |
+| `PlaceholderExecutor` | Deterministic default executor with `noop`, `echo`, `fail`, `identity`, `context_read` built-ins. Custom actions injectable. |
+| `EventBus` | Synchronous in-process pub/sub with topic filtering. Listeners are exception-isolated. |
+| `HookManager` | Registry and dispatcher for pre/post stage hooks. Supports short-circuit and `HookAbort`. |
+| `TelemetryCollector` | Subscribes to the event bus and records per-execution metrics (durations, counts, providers, tools). |
+| `SystemMonitor` | Pulls telemetry and queue state to produce `HealthReport` snapshots with `healthy` / `degraded` / `unhealthy` status. |
+| `RecoveryManager` | Owns retry and compensation strategy. Exponential backoff with configurable max retries and retryable error filters. |
+| `RuntimeScheduler` | Triggers executions on a cadence (one_time, interval, cron). Enqueues `ExecutionRequest` items on tick. |
+| `RuntimeState` | Ten-state lifecycle enum with explicit transition table. |
+| `PipelineContext` | Mutable state carried through every stage: request, plan, outcome, response, state, artifacts. |
+
+### Event flow
+
+Every significant runtime action emits an event on the `EventBus`. The bus dispatches synchronously to every matching listener in registration order. Listeners are exception-isolated: a raising listener is logged and skipped but does not stop the dispatch to subsequent listeners.
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Runtime
+    participant Dispatcher
+    participant Pipeline
+    participant Executor
+    participant Bus as EventBus
+    participant Telemetry
+    participant Recovery
+
+    User->>Runtime: handle("hello")
+    Runtime->>Bus: RequestReceived
+    Runtime->>Dispatcher: dispatch_request
+    Dispatcher->>Bus: SessionOpened
+    Dispatcher->>Pipeline: run(context)
+    Pipeline->>Bus: ExecutionStarted
+    Pipeline->>Bus: PlanningStarted
+    Pipeline->>Bus: PlanningCompleted
+    Pipeline->>Bus: DispatchStarted
+    Pipeline->>Bus: DispatchCompleted
+    Pipeline->>Executor: execute_plan
+    loop each step
+        Executor->>Bus: StepStarted
+        Executor->>Bus: StepCompleted
+    end
+    Pipeline->>Bus: ReviewStarted
+    Pipeline->>Bus: ReviewCompleted
+    Pipeline->>Bus: ExecutionCompleted
+    Pipeline-->>Dispatcher: context (completed)
+    Dispatcher-->>Runtime: context
+    Runtime-->>User: response
+    Bus-->>Telemetry: record(event)
+    Bus-->>Recovery: record(event)
+```
+
+| Event | Emitted by | When |
+|-------|-----------|------|
+| `RequestReceived` | Dispatcher | A new request is pulled from the queue. |
+| `SessionOpened` | Dispatcher | A pipeline context has been created. |
+| `PlanningStarted` / `PlanningCompleted` | PlanningStage | Around the planning phase. |
+| `DispatchStarted` / `DispatchCompleted` | DispatchStage | Around the dispatch phase. |
+| `ExecutionStarted` | Executor / Pipeline | Before the first step runs. |
+| `StepStarted` / `StepCompleted` / `StepFailed` | Executor | Around each step. |
+| `ReviewStarted` / `ReviewCompleted` | ReviewStage | Around the review phase. |
+| `ExecutionCompleted` / `ExecutionFailed` | Pipeline | On terminal success / failure. |
+| `ExecutionCancelled` / `ExecutionPaused` / `ExecutionResumed` | Runtime | On lifecycle control calls. |
+| `MemoryUpdated` / `KnowledgeUpdated` / `ReflectionTriggered` | Review / Custom | On engine updates. |
+| `ProviderSelected` / `ToolInvoked` | Dispatch / Custom | On resource selection. |
+
+### Recovery flow
+
+When an execution fails, the `RecoveryManager` decides what to do next. The decision is based on the failure, the number of attempts so far, and the configured `RecoveryPolicy`.
+
+```mermaid
+flowchart TB
+    Start([Execution fails]) --> CheckRetryable{Error retryable?}
+    CheckRetryable -- No --> Abort([Abort])
+    CheckRetryable -- Yes --> CheckAttempts{Attempts < max_retries?}
+    CheckAttempts -- No --> CheckCompensator{Compensator set?}
+    CheckCompensator -- No --> Abort
+    CheckCompensator -- Yes --> Compensate{Compensator returns payload?}
+    Compensate -- No --> Abort
+    Compensate -- Yes --> Compensated([Compensate])
+    CheckAttempts -- Yes --> Backoff[Compute backoff delay]
+    Backoff --> ScheduleRetry[Schedule retry at wait_until]
+    ScheduleRetry --> Retry([Retry])
+```
+
+The default policy uses exponential backoff: `delay = min(base * 2^(attempt-1), max_delay)`. A compensator callable can be injected to provide fallback behaviour when retries are exhausted (e.g. fall back to a different provider, return a cached response, invoke a degraded-mode handler).
+
+### Execution examples
+
+**Minimal end-to-end execution:**
+
+```python
+from atlas.runtime import Runtime
+
+rt = Runtime()
+ctx = rt.handle("hello world")
+assert ctx.state.value == "completed"
+assert ctx.response is not None
+```
+
+**Submitting and draining:**
+
+```python
+rt = Runtime()
+rt.submit("first")
+rt.submit("second")
+results = rt.drain()
+assert len(results) == 2
+```
+
+**Subscribing to events:**
+
+```python
+from atlas.runtime import Runtime, StepCompleted
+
+rt = Runtime()
+steps = []
+rt.bus.subscribe(StepCompleted, steps.append)
+rt.handle("hello")
+assert len(steps) >= 1
+```
+
+**Scheduled execution:**
+
+```python
+from datetime import datetime, timedelta, UTC
+from atlas.runtime import Runtime, ScheduledTask, ScheduleKind
+
+rt = Runtime()
+run_at = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+rt.register_schedule(ScheduledTask(
+    id="daily_ping",
+    request="ping",
+    kind=ScheduleKind.ONE_TIME,
+    run_at=run_at,
+))
+results = rt.tick(now=run_at + timedelta(minutes=1))
+assert len(results) == 1
+```
+
+**Health monitoring:**
+
+```python
+rt = Runtime()
+rt.handle("hello")
+health = rt.health()
+assert health["status"] == "healthy"
+assert health["completed_executions"] >= 1
+```
+
+**Custom executor action (dependency injection):**
+
+```python
+from atlas.runtime import Runtime, PlaceholderExecutor
+
+def greet(params, context):
+    return f"Hello, {params['name']}!"
+
+rt = Runtime(executor=PlaceholderExecutor(actions={"greet": greet}))
+```
+
+See [`docs/runtime_engine.md`](docs/runtime_engine.md) for the full architecture document, including the dependency graph, every event type, and the complete recovery policy reference.
 
 
 ## Atlas Tool Layer
