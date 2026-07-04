@@ -24,6 +24,29 @@ Together, these form a coherent operating environment in which an AI can work wi
 
 ```
 atlas/
+├── mcp/           # MCP Layer (universal communication backbone, 17 connectors)
+│   ├── manager.py       # MCPManager top-level orchestrator
+│   ├── base.py          # BaseConnector abstract contract
+│   ├── registry.py      # MCPRegistry catalog with capability lookup
+│   ├── router.py        # Capability-based request routing
+│   ├── session.py       # MCPSession lifecycle management
+│   ├── health.py        # MCPHealthMonitor aggregate health
+│   ├── heartbeat.py     # HeartbeatMonitor connector availability
+│   ├── discovery.py     # ConnectorDiscovery (filesystem/manual/network)
+│   ├── permissions.py   # PermissionLevel + PermissionValidator
+│   ├── protocol.py      # Handshake, versioning, capability negotiation
+│   ├── transport.py     # 5 transports (in_process/stdio/http/websocket/named_pipe)
+│   ├── server.py        # MCPServerInstance
+│   ├── client.py        # MCPClientInstance
+│   ├── models.py        # Frozen dataclasses (14 models)
+│   ├── exceptions.py    # 13-exception hierarchy
+│   └── connectors/      # 17 deterministic placeholder connectors
+│       ├── filesystem.py    ├── ollama.py        ├── photoshop.py
+│       ├── github.py        ├── openrouter.py    ├── canva.py
+│       ├── browser.py       ├── surpac.py        ├── google_forms.py
+│       ├── playwright.py    ├── autocad.py       ├── excel.py
+│       ├── blender.py       ├── qgis.py          ├── word.py
+│       └── windows.py                               └── powerpoint.py
 ├── execution/     # Execution Engine (goal -> plan -> dispatch -> execute -> review -> report)
 │   ├── engine.py        # ExecutionEngine pipeline orchestrator
 │   ├── planner.py       # Goal -> ExecutionPlan (deterministic templates, AI-ready)
@@ -577,6 +600,165 @@ for task_id, result in report.results.items():
 8. **File tracking** — Wire the reporter to a filesystem watcher.
 
 See [`docs/execution_engine.md`](docs/execution_engine.md) for the full architecture document, including the dependency graph, planner templates, dispatcher capability matching, executor dispatch order, and 7 usage examples.
+
+
+## Atlas MCP Layer
+
+The MCP (Model Context Protocol) Layer is the universal communication backbone of the Atlas AI Operating System. It exposes a single, capability-based API through which Atlas can talk to filesystems, browsers, GitHub, Blender, Ollama, Windows, OpenRouter, Surpac, AutoCAD, QGIS, Photoshop, Canva, Google Forms, Excel, Word, and PowerPoint — and any future connector — without changing the architecture. The layer is **personal** (one operator), **offline-first** (every default is deterministic), **provider-agnostic**, **tool-agnostic**, **agent-agnostic**, **workflow-agnostic**, and **runtime-agnostic**.
+
+### Architecture
+
+```mermaid
+flowchart TB
+    User([Atlas / Operator]) --> Manager
+
+    subgraph MCPLayer["MCP Layer"]
+        Manager["MCPManager<br/>(top-level orchestrator)"]
+        Registry["MCPRegistry"]
+        Router["MCPRouter"]
+        Sessions["SessionManager"]
+        Health["MCPHealthMonitor"]
+        Heartbeat["HeartbeatMonitor"]
+        Discovery["ConnectorDiscovery"]
+        Permissions["PermissionValidator"]
+    end
+
+    subgraph Connectors["17 Built-in Connectors"]
+        FS["Filesystem"]
+        GH["GitHub"]
+        BR["Browser"]
+        PW["Playwright"]
+        BL["Blender"]
+        OL["Ollama"]
+        WN["Windows"]
+        OR["OpenRouter"]
+        Others["... 9 more"]
+    end
+
+    Manager --> Registry
+    Manager --> Router
+    Manager --> Sessions
+    Manager --> Health
+    Manager --> Heartbeat
+    Manager --> Discovery
+    Manager --> Permissions
+    Registry --> FS
+    Registry --> GH
+    Registry --> BR
+    Registry --> PW
+    Registry --> BL
+    Registry --> OL
+    Registry --> WN
+    Registry --> OR
+    Registry --> Others
+    Router -->|capability-based| Registry
+```
+
+### Component table
+
+| Component | Responsibility |
+|-----------|----------------|
+| `MCPManager` | Top-level orchestrator. Public API: `register_connector`, `open_session`, `execute`, `execute_capability`, `health`, `heartbeat`, `reconnect`, `statistics`. |
+| `BaseConnector` | Abstract contract: `connect`, `disconnect`, `health`, `capabilities`, `execute`, `discover`. Handles state transitions + error wrapping. |
+| `MCPRegistry` | In-memory catalog of registered connectors. Lookup by name, capability, tag, or predicate. |
+| `MCPRouter` | Capability-based request routing. No hardcoded connector names. |
+| `SessionManager` | Owns open `MCPSession` instances. Lifecycle (open, close, timeout, retry, reconnect). |
+| `MCPHealthMonitor` | Aggregates per-connector health into a single roll-up (healthy/warning/critical/offline). |
+| `HeartbeatMonitor` | Periodically probes every connector. Records latency, recommends reconnect. |
+| `ConnectorDiscovery` | Discovers connectors from filesystem / manual registration / future network. |
+| `PermissionValidator` | Validates that a session's permissions satisfy a connector's required level. |
+| `MCPRegistry` | Catalog with `register`, `unregister`, `find_by_capability`, `find_by_tag`, `statistics`. |
+| `MCPServerInstance` | Server-side MCP protocol: handshake, handle requests, dispatch to handler. |
+| `MCPClientInstance` | Client-side MCP protocol: connect, send, call. |
+| `BaseTransport` | Abstract transport contract. 5 implementations (in_process/stdio/http/websocket/named_pipe). |
+| `MCPStatus` | 7-value enum: DISCONNECTED, CONNECTING, CONNECTED, DEGRADED, DISCONNECTING, FAILED, UNKNOWN. |
+| `HealthLevel` | 5-value enum: HEALTHY, WARNING, CRITICAL, OFFLINE, UNKNOWN. |
+| `TransportKind` | 5-value enum: STDIO, HTTP, WEBSOCKET, NAMED_PIPE, IN_PROCESS. |
+
+### Connector table
+
+| Connector | Capabilities | Required permission |
+|-----------|-------------|---------------------|
+| `FilesystemConnector` | file.read/write/list/delete | READ |
+| `GitHubConnector` | repo.list/get, issue.list/create, pr.create, git.commit/push | READ |
+| `BrowserConnector` | browser.navigate/click/extract/screenshot/fill | EXECUTE |
+| `PlaywrightConnector` | playwright.launch/goto/click/type/pdf/screenshot/evaluate | EXECUTE |
+| `BlenderConnector` | blender.scene.new, object.add/transform, render, export | EXECUTE |
+| `OllamaConnector` | ollama.generate/chat/embed/models/pull | READ |
+| `WindowsConnector` | windows.app.open/close, shell, registry, clipboard | EXECUTE |
+| `OpenRouterConnector` | openrouter.generate/chat/models | READ |
+| `SurpacConnector` | surpac.blockmodel.load/query, drillhole, surface, export | EXECUTE |
+| `AutoCADConnector` | autocad.drawing.new/open, layer, entity, dimension, export | EXECUTE |
+| `QGISConnector` | qgis.project, layer, analysis, map.export, plugin | EXECUTE |
+| `PhotoshopConnector` | photoshop.doc, layer, filter, adjustment, export | EXECUTE |
+| `CanvaConnector` | canva.design.create, template.list, element, text, export | READ |
+| `GoogleFormsConnector` | forms.create/list, question, responses | READ |
+| `ExcelConnector` | excel.workbook, sheet, cell, formula, export | READ |
+| `WordConnector` | word.doc, paragraph, heading, style, table, export | READ |
+| `PowerPointConnector` | ppt.presentation, slide, text, image, template, export | READ |
+
+### Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> DISCONNECTED
+    DISCONNECTED --> CONNECTING: connect()
+    CONNECTING --> CONNECTED: _do_connect() ok
+    CONNECTING --> FAILED: _do_connect() error
+    CONNECTED --> DEGRADED: high latency
+    DEGRADED --> CONNECTED: recovered
+    CONNECTED --> DISCONNECTING: disconnect()
+    DISCONNECTING --> DISCONNECTED: _do_disconnect()
+    FAILED --> CONNECTING: reconnect()
+```
+
+### Examples
+
+**Register all 17 connectors:**
+
+```python
+from atlas.mcp import MCPManager, instantiate_all
+
+manager = MCPManager()
+for connector in instantiate_all():
+    manager.register_connector(connector)
+print(f"Registered {len(manager.list_connectors())} connectors")
+print(f"Overall health: {manager.overall_health().value}")
+```
+
+**Execute a request:**
+
+```python
+from atlas.mcp import MCPManager, FilesystemConnector
+
+manager = MCPManager()
+manager.register_connector(FilesystemConnector())
+session = manager.open_session("filesystem", permissions=["read"])
+response = manager.execute_capability(
+    "file.read",
+    {"path": "/tmp/test.txt"},
+    connector="filesystem",
+    session_id=session.id,
+)
+print(response.success, response.output)
+```
+
+**Health monitoring:**
+
+```python
+manager = MCPManager()
+for c in instantiate_all():
+    manager.register_connector(c)
+health = manager.health()
+for name, h in health.items():
+    print(f"  {name}: {h.level.value} ({h.latency_ms}ms)")
+```
+
+### Future roadmap
+
+The MCP Layer is designed so future connectors (Slack, Notion, Linear, Figma, VS Code, Terminal, Database, Kubernetes, Docker, AWS/GCP/Azure) plug in without modifying existing code. To add a connector: create a file in `atlas/mcp/connectors/`, inherit `BaseConnector`, implement the four `_do_*` methods, and add the class to `__init__.py`.
+
+See [`docs/mcp_layer.md`](docs/mcp_layer.md) for the full architecture document, including connector lifecycle, transport architecture, capability routing, permission flow, health monitoring, dependency graph, and 5 usage examples.
 
 
 ## Atlas Runtime Engine
