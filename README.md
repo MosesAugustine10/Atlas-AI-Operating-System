@@ -24,6 +24,18 @@ Together, these form a coherent operating environment in which an AI can work wi
 
 ```
 atlas/
+├── integration/   # Integration Layer (DI container + lifecycle + orchestrator)
+│   ├── orchestrator.py  # User-facing façade: initialize/start/stop/restart/run/health
+│   ├── bootstrap.py     # Load config -> build container -> wire -> start -> health
+│   ├── container.py     # DIContainer with singleton/transient scopes + cycle detection
+│   ├── wiring.py        # Registers every Atlas subsystem into the container
+│   ├── startup.py       # Ordered startup in canonical LifecyclePhase order
+│   ├── shutdown.py      # Graceful shutdown in reverse dependency order
+│   ├── health.py        # HealthMonitor aggregates per-subsystem health
+│   ├── diagnostics.py   # DiagnosticsCollector captures startup/uptime/loaded resources
+│   ├── registry.py      # UnifiedRegistry facade over all subsystem registries
+│   ├── service_locator.py  # Typed lazy accessor over the container
+│   └── dependency.py    # ServiceDescriptor, ServiceScope, LifecyclePhase
 ├── core/          # Kernel architecture + identity & principles
 │   ├── kernel.py      # Orchestrates every request end-to-end
 │   ├── planner.py     # Converts goals into executable tasks
@@ -164,6 +176,284 @@ flowchart LR
 | `State` | Represents the current execution phase and history. |
 | `Context` | Carries request + memory + knowledge + config through the pipeline. |
 | `Session` | Tracks one execution from start to finish. |
+
+
+## Atlas Integration Layer
+
+The Integration Layer is the dependency wiring heart that connects every Atlas subsystem into one coherent AI Operating System. It owns a dependency injection container, ordered startup and shutdown managers, a unified health monitor, a diagnostics collector, a unified registry, and a single user-facing `Orchestrator` façade. The Integration Layer **does not implement business logic** — its sole purpose is dependency wiring, lifecycle management, startup, shutdown, dependency injection, configuration loading, and subsystem orchestration.
+
+It is **provider-agnostic**, **tool-agnostic**, **agent-agnostic**, **workflow-agnostic**, and **runtime-agnostic**. It is designed so future modules (Dashboard, MCP Layer, Desktop App, Social Media Automation, Vision, Voice, Blender, Surpac, QGIS, AutoCAD, Remotion, Hyperframes, Ollama) plug in without modifying existing code.
+
+### Architecture
+
+```mermaid
+flowchart TB
+    User([User]) --> Orchestrator
+
+    subgraph Integration["Integration Layer"]
+        Orchestrator["Orchestrator<br/>(user façade)"]
+        Bootstrap["Bootstrap"]
+        Wiring["Wiring"]
+        Container["DIContainer"]
+        Startup["StartupManager"]
+        Shutdown["ShutdownManager"]
+        Health["HealthMonitor"]
+        Diag["DiagnosticsCollector"]
+        Registry["UnifiedRegistry"]
+        Locator["ServiceLocator"]
+    end
+
+    subgraph Subsystems["Atlas Subsystems (injected)"]
+        Config["Config"]
+        Memory["MemoryEngine"]
+        Knowledge["KnowledgeEngine"]
+        Providers["ProviderManager"]
+        Tools["ToolManager"]
+        Skills["SkillManager"]
+        Agents["Router / AgentManager"]
+        Workflows["WorkflowEngine"]
+        Runtime["Runtime"]
+        Telemetry["TelemetryCollector"]
+    end
+
+    Orchestrator --> Bootstrap
+    Bootstrap --> Wiring
+    Wiring --> Container
+    Bootstrap --> Startup
+    Orchestrator --> Shutdown
+    Orchestrator --> Health
+    Orchestrator --> Diag
+    Container --> Registry
+    Container --> Locator
+
+    Container -.->|owns| Config
+    Container -.->|owns| Memory
+    Container -.->|owns| Knowledge
+    Container -.->|owns| Providers
+    Container -.->|owns| Tools
+    Container -.->|owns| Skills
+    Container -.->|owns| Agents
+    Container -.->|owns| Workflows
+    Container -.->|owns| Runtime
+    Container -.->|owns| Telemetry
+```
+
+### Dependency graph
+
+The Integration Layer has zero circular imports. Modules form a strict acyclic dependency graph:
+
+```mermaid
+flowchart TB
+    dependency["dependency.py<br/>(leaf)"]
+    registry["registry.py<br/>(leaf)"]
+    container["container.py"]
+    service_locator["service_locator.py"]
+    health["health.py"]
+    diagnostics["diagnostics.py"]
+    wiring["wiring.py"]
+    startup["startup.py"]
+    shutdown["shutdown.py"]
+    bootstrap["bootstrap.py"]
+    orchestrator["orchestrator.py"]
+
+    container --> dependency
+    service_locator --> container
+    health --> container
+    diagnostics --> container
+    wiring --> container
+    wiring --> dependency
+    wiring --> registry
+    startup --> container
+    startup --> dependency
+    shutdown --> container
+    shutdown --> dependency
+    bootstrap --> container
+    bootstrap --> wiring
+    bootstrap --> startup
+    bootstrap --> health
+    orchestrator --> bootstrap
+    orchestrator --> container
+    orchestrator --> health
+    orchestrator --> diagnostics
+    orchestrator --> startup
+    orchestrator --> shutdown
+```
+
+### Container architecture
+
+The `DIContainer` is the single place where every Atlas subsystem is constructed. Services are registered as `ServiceDescriptor` records (name + factory + scope + phase). Resolution is lazy by default: a service is not constructed until the first time it is requested. Singletons are cached on first resolution; transients are rebuilt every time. Circular dependencies are detected and raise `CircularDependencyError`.
+
+The container supports two lookup styles:
+
+- **By name** — `container.get("memory")` returns the service registered under that exact name.
+- **By interface** — `container.get_typed(SomeClass)` returns any service whose descriptor declares `SomeClass` in its `interfaces` tuple.
+
+Every service belongs to a `LifecyclePhase`. The startup manager walks phases in canonical order; the shutdown manager walks them in reverse.
+
+### Startup sequence
+
+The `StartupManager` walks every registered service in canonical `LifecyclePhase` order and force-instantiates each one. This guarantees that every singleton is constructed exactly once and the construction order matches the dependency order.
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Bootstrap
+    participant Wiring
+    participant Container
+    participant Startup
+    participant Health
+
+    User->>Bootstrap: run(config)
+    Bootstrap->>Wiring: wire_all(config)
+    Wiring->>Container: register every subsystem
+    Bootstrap->>Startup: start()
+    Startup->>Container: instantiate every service in phase order
+    Startup-->>Bootstrap: StartupReport
+    Bootstrap->>Health: snapshot()
+    Health-->>Bootstrap: HealthReport
+    Bootstrap-->>User: BootstrappedAtlas
+```
+
+Canonical startup order:
+
+```
+Config → Logger → Memory → Knowledge → Providers → Tools → Skills →
+Agents → Workflows → Runtime → Telemetry → Dashboard → Health → Ready
+```
+
+### Shutdown sequence
+
+The `ShutdownManager` walks every initialized service in reverse canonical order and invokes its `shutdown()` method if it has one. Services that do not implement `shutdown()` are skipped silently. The container is cleared after shutdown so it cannot be reused.
+
+Canonical shutdown order (reverse of startup, excluding `READY`):
+
+```
+Health → Dashboard → Telemetry → Runtime → Workflows → Agents → Skills →
+Tools → Providers → Knowledge → Memory → Logger → Config
+```
+
+### Health architecture
+
+The `HealthMonitor` aggregates per-subsystem health signals into a single `HealthReport`. Each subsystem contributes a `SubsystemHealth` record with a `name`, `status`, `detail`, and `metrics`. The overall status rolls up by severity: if any subsystem is `unhealthy` the overall is `unhealthy`; if any is `degraded` the overall is `degraded`; otherwise it is `healthy`.
+
+Example health report:
+
+| Subsystem | Status | Detail |
+|-----------|--------|--------|
+| config | healthy | loaded |
+| memory | healthy | 5 stores |
+| knowledge | healthy | 0 documents |
+| providers | healthy | 9 online |
+| tools | degraded | 0 loaded |
+| agents | degraded | 0 ready |
+| skills | degraded | 0 installed |
+| workflows | healthy | ready |
+| runtime | healthy | running |
+| telemetry | healthy | 0 executions observed |
+| **overall** | **degraded** | |
+
+### Subsystem wiring
+
+The `Wiring` class is the single place that knows how to construct every Atlas subsystem. Each `register_*` method adds a `ServiceDescriptor` to the container. The `wire_all()` method registers every subsystem with sensible deterministic defaults.
+
+| Service name | Phase | Factory produces |
+|--------------|-------|------------------|
+| `config` | `CONFIG` | `Config` (from path / dict / default) |
+| `logger` | `LOGGER` | Root `atlas` logger |
+| `memory` | `MEMORY` | `MemoryEngine` (in-memory storage) |
+| `knowledge` | `KNOWLEDGE` | `KnowledgeEngine` (hashing embedder) |
+| `providers` | `PROVIDERS` | `ProviderManager` with 9 built-in providers |
+| `tools` | `TOOLS` | `ToolManager` (empty registry) |
+| `skills` | `SKILLS` | `SkillManager` (empty registry) |
+| `agents` | `AGENTS` | `Router` (empty) |
+| `workflows` | `WORKFLOWS` | `WorkflowEngine` (placeholder executor) |
+| `runtime` | `RUNTIME` | `Runtime` (single execution entry point) |
+| `telemetry` | `TELEMETRY` | `TelemetryCollector` (pulled from runtime) |
+| `health` | `HEALTH` | `HealthMonitor` |
+| `registry` | `HEALTH` | `UnifiedRegistry` facade |
+| `diagnostics` | `HEALTH` | `DiagnosticsCollector` |
+| `locator` | `READY` | `ServiceLocator` |
+
+### Component responsibilities
+
+| Component | Responsibility |
+|-----------|----------------|
+| `Orchestrator` | User-facing façade. Methods: `initialize()`, `start()`, `stop()`, `restart()`, `status()`, `health()`, `run(request)`. The only object users should interact with. |
+| `Bootstrap` | Turns a config into a running Atlas: load config → build container → wire → start → health check → return `BootstrappedAtlas`. |
+| `DIContainer` | Dependency injection container. Owns every subsystem. Singleton/transient scopes. Lazy resolution. Cycle detection. Lookup by name or interface. |
+| `Wiring` | Registers every Atlas subsystem into the container with stable names, factories, scopes, and phases. |
+| `StartupManager` | Walks every service in canonical phase order and instantiates each one. Records timing and failures. |
+| `ShutdownManager` | Walks every initialized service in reverse phase order and invokes `shutdown()` if present. Clears the container. |
+| `HealthMonitor` | Aggregates per-subsystem health into a `HealthReport` with overall roll-up. |
+| `DiagnosticsCollector` | Captures startup time, uptime, loaded resources, memory/knowledge/runtime statistics, config summary, container inventory. |
+| `UnifiedRegistry` | Read-only facade over every per-subsystem registry. Query by kind and name. |
+| `ServiceLocator` | Typed lazy accessor over the container (``locator.runtime``, ``locator.memory``, etc.). |
+| `ServiceDescriptor` | Immutable registration record: name, factory, scope, phase, interfaces, tags. |
+| `LifecyclePhase` | 16 phases governing startup/shutdown order. |
+
+### Execution examples
+
+**Minimal end-to-end:**
+
+```python
+from atlas.integration import Orchestrator
+
+orch = Orchestrator()
+orch.initialize()
+ctx = orch.run("hello world")
+print(ctx.state.value)    # "completed"
+print(ctx.response)       # "noop"
+orch.stop()
+```
+
+**Inspecting health:**
+
+```python
+orch = Orchestrator()
+orch.initialize()
+report = orch.health()
+print(report.overall.value)          # "degraded" (no tools/agents registered)
+for name, sub in report.subsystems.items():
+    print(f"  {name:12s} {sub.status.value:10s} {sub.detail}")
+orch.stop()
+```
+
+**Inspecting diagnostics:**
+
+```python
+orch = Orchestrator()
+orch.initialize()
+diag = orch.diagnostics()
+print(f"Providers: {diag.providers}")
+print(f"Uptime:    {diag.uptime_seconds:.1f}s")
+print(f"Startup:   {diag.startup_time_seconds:.3f}s")
+orch.stop()
+```
+
+**Using the unified registry:**
+
+```python
+orch = Orchestrator()
+orch.initialize()
+registry = orch.container.get("registry")
+print(registry.count("providers"))     # 9
+print(registry.names("providers"))     # ["anthropic", "gemini", ...]
+orch.stop()
+```
+
+**Using the service locator:**
+
+```python
+orch = Orchestrator()
+orch.initialize()
+locator = orch.container.get("locator")
+runtime = locator.runtime
+memory = locator.memory
+providers = locator.providers
+orch.stop()
+```
+
+See [`docs/integration_layer.md`](docs/integration_layer.md) for the full architecture document, including the container explanation, boot sequence, health system, diagnostics, and extension guide.
 
 
 ## Atlas Runtime Engine
