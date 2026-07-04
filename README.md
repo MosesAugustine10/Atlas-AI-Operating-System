@@ -24,6 +24,15 @@ Together, these form a coherent operating environment in which an AI can work wi
 
 ```
 atlas/
+├── execution/     # Execution Engine (goal -> plan -> dispatch -> execute -> review -> report)
+│   ├── engine.py        # ExecutionEngine pipeline orchestrator
+│   ├── planner.py       # Goal -> ExecutionPlan (deterministic templates, AI-ready)
+│   ├── dispatcher.py    # Capability-based agent/provider/tool/workflow resolution
+│   ├── executor.py      # DI-based task executor with retry + skip + memory recording
+│   ├── reviewer.py      # Evaluates results: status, quality score, retry recommendation
+│   ├── reporter.py      # Assembles professional ExecutionReport
+│   ├── models.py        # Frozen dataclasses: Plan, Task, Result, Report, Context, Metrics
+│   └── strategy.py      # 8 execution strategies (Sequential/Parallel/Priority/Retry/...)
 ├── integration/   # Integration Layer (DI container + lifecycle + orchestrator)
 │   ├── orchestrator.py  # User-facing façade: initialize/start/stop/restart/run/health
 │   ├── bootstrap.py     # Load config -> build container -> wire -> start -> health
@@ -454,6 +463,120 @@ orch.stop()
 ```
 
 See [`docs/integration_layer.md`](docs/integration_layer.md) for the full architecture document, including the container explanation, boot sequence, health system, diagnostics, and extension guide.
+
+
+## Atlas Execution Engine
+
+The Execution Engine is the heart of the Atlas AI Operating System. It converts a natural-language goal into an ordered, executable plan, dispatches each task to the appropriate agent / provider / tool / workflow, executes the tasks, reviews the outcomes, and produces a professional execution report. The engine is **personal** — optimized for one operator, not SaaS, not multi-tenant. It is **provider-agnostic**, **agent-agnostic**, **tool-agnostic**, **workflow-agnostic**, **MCP-ready**, and **fully offline compatible**.
+
+### Architecture
+
+```mermaid
+flowchart TB
+    Goal([Natural Language Goal]) --> Engine
+
+    subgraph Engine["ExecutionEngine"]
+        Planner["ExecutionPlanner<br/>(goal → plan)"]
+        Dispatcher["ExecutionDispatcher<br/>(plan → resolutions)"]
+        Executor["ExecutionExecutor<br/>(resolutions → results)"]
+        Reviewer["ExecutionReviewer<br/>(results → review)"]
+        Reporter["ExecutionReporter<br/>(review → report)"]
+    end
+
+    subgraph Subsystems["Injected Subsystems (DI)"]
+        Providers["ProviderManager"]
+        Tools["ToolManager"]
+        Workflows["WorkflowEngine"]
+        Skills["SkillManager"]
+        Memory["MemoryEngine"]
+        Knowledge["KnowledgeEngine"]
+    end
+
+    Engine --> Planner
+    Planner -->|ExecutionPlan| Dispatcher
+    Dispatcher -->|TaskResolution[]| Executor
+    Executor -->|ExecutionResult[]| Reviewer
+    Reviewer -->|ExecutionReview| Reporter
+    Reporter -->|ExecutionReport| Result([ExecutionReport])
+
+    Executor -.->|uses| Providers
+    Executor -.->|uses| Tools
+    Executor -.->|uses| Workflows
+    Executor -.->|uses| Skills
+    Executor -.->|uses| Memory
+    Executor -.->|uses| Knowledge
+    Reporter -.->|reads| Memory
+    Reporter -.->|reads| Knowledge
+```
+
+### Execution pipeline
+
+The engine runs a fixed five-stage pipeline. Every stage is dependency-injected and replaceable.
+
+```mermaid
+flowchart LR
+    Goal([Goal]) --> Plan[Planner]
+    Plan --> Dispatch[Dispatcher]
+    Dispatch --> Exec[Executor]
+    Exec --> Review[Reviewer]
+    Review --> Report[Reporter]
+    Report --> Result([ExecutionReport])
+```
+
+1. **Planner** — Converts the goal into an `ExecutionPlan` (ordered `ExecutionTask` items with dependencies, priority, retry policy, optional flags).
+2. **Dispatcher** — Resolves each task to a `TaskResolution` (agent, provider, tool, workflow, skill) using capability-based matching against injected registries.
+3. **Executor** — Runs each task via the appropriate subsystem. Honors retry policies, optional skips, and dependency failures.
+4. **Reviewer** — Evaluates results: overall status, per-task warnings, missing outputs, retry recommendation, quality score.
+5. **Reporter** — Assembles a professional `ExecutionReport`.
+
+### Component table
+
+| Component | Responsibility |
+|-----------|----------------|
+| `ExecutionEngine` | Top-level orchestrator. Public API: `run(goal)`, `execute_goal(goal)`, `get_history()`, `status()`. |
+| `ExecutionPlanner` | Goal → `ExecutionPlan`. Deterministic templates for "create website", "research", "generate code", "deploy". AI-ready. |
+| `ExecutionDispatcher` | Capability-based resolver. No hardcoded names — queries injected registries and matches on `TaskKind` capability tags. |
+| `ExecutionExecutor` | Runs one task at a time. Dispatches to tools / workflows / skills / providers / knowledge / built-in actions. Retry + skip + memory recording. |
+| `ExecutionReviewer` | Evaluates outcomes: overall status, per-task warnings, missing outputs, retry recommendation, 0.0–1.0 quality score. |
+| `ExecutionReporter` | Assembles `ExecutionReport` with duration, providers/agents/tools/workflows used, memory usage, knowledge hits, files, git commits, token usage, estimated cost, warnings, errors. |
+| `ExecutionPlan` | Frozen: id, goal, tasks, strategy, created_at, metadata. |
+| `ExecutionTask` | Frozen: id, name, kind, action, params, dependencies, priority, optional, retry_policy. |
+| `ExecutionResult` | Frozen: task_id, status, output, error, timing, attempts, provider/agent/tool/workflow, token_usage, cost. |
+| `ExecutionReport` | Frozen: the full professional report. |
+| `ExecutionContext` | Frozen: goal, plan, results, artifacts. Updated immutably via `with_plan` / `with_result` / `with_artifact`. |
+| `ExecutionStrategy` | 8 values: SEQUENTIAL, PARALLEL, PRIORITY, DEPENDENCY, RETRY, FALLBACK, MANUAL, AUTOMATIC. |
+| `TaskKind` | 7 values: RESEARCH, GENERATE, TEST, DEPLOY, GIT, REVIEW, CUSTOM. |
+| `RetryPolicy` | Frozen: max_attempts, backoff_seconds, max_backoff_seconds, retryable_errors. |
+
+### Example
+
+```python
+from atlas.execution import ExecutionEngine
+
+engine = ExecutionEngine()
+report = engine.run("Create website for my portfolio")
+print(report.status.value)         # "completed"
+print(report.metrics.total_tasks)  # 6
+print(report.metrics.completed_tasks)  # 6
+print(report.quality_score)        # 1.0
+print(report.duration_seconds)     # 0.001
+
+for task_id, result in report.results.items():
+    print(f"  {task_id}: {result.status.value} (attempts={result.attempts})")
+```
+
+### Future roadmap
+
+1. **AI-driven planning** — Replace the deterministic planner with an LLM-backed implementation.
+2. **LLM-backed review** — Subclass `ExecutionReviewer` for LLM quality scoring.
+3. **Parallel execution** — Implement the `PARALLEL` strategy with a thread pool.
+4. **MCP integration** — Inject an MCP connector as a tool; no code changes required.
+5. **Persistent history** — Wrap `ExecutionHistory` in a SQLite / filesystem adapter.
+6. **Operator approval** — Implement the `MANUAL` strategy with an approval callback.
+7. **Cost tracking** — Inject real provider cost rates for accurate `estimated_cost`.
+8. **File tracking** — Wire the reporter to a filesystem watcher.
+
+See [`docs/execution_engine.md`](docs/execution_engine.md) for the full architecture document, including the dependency graph, planner templates, dispatcher capability matching, executor dispatch order, and 7 usage examples.
 
 
 ## Atlas Runtime Engine
