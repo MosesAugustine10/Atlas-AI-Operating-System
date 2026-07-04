@@ -69,7 +69,17 @@ atlas/
 │   ├── embeddings.py  # Embedding model + HashingEmbedder placeholder
 │   ├── vectorstore.py # InMemoryVectorStore (brute-force cosine search)
 │   └── retriever.py   # Query → Embed → Search → Top-K pipeline
-├── workflows/     # Repeatable, named processes
+├── workflows/     # Workflow Engine (definitions, runs, scheduling, templates)
+│   ├── engine.py      # Orchestrates registration, runs, schedules, and templates
+│   ├── base.py        # Abstract BaseExecutor and BaseScheduler contracts
+│   ├── models.py      # WorkflowStep, WorkflowDefinition, WorkflowRun, WorkflowSchedule
+│   ├── state.py       # WorkflowState lifecycle enum and transition table
+│   ├── validator.py   # Definition validation with cycle detection
+│   ├── registry.py    # Workflow definition catalog with duplicate detection
+│   ├── history.py     # Append-only run snapshot store
+│   ├── executor.py    # PlaceholderExecutor with deterministic built-in actions
+│   ├── scheduler.py   # InMemoryScheduler (one_time / interval / cron)
+│   └── templates.py   # Reusable workflow templates and TemplateRegistry
 ├── prompts/       # Reusable prompt templates
 ├── tools/         # Tool System (registry, manager, permissions, adapters, services)
 │   ├── base.py        # Abstract BaseTool contract
@@ -387,6 +397,300 @@ The `InMemoryVectorStore` is the default for testing and small datasets. It can 
 - **FAISS** — Facebook's efficient similarity search library
 - **Qdrant** — high-performance vector search engine
 - **Milvus** — scalable vector database for production workloads
+
+
+## Atlas Workflow Engine
+
+The Workflow Engine is Atlas's provider-agnostic orchestration framework. It lets you define reusable workflows as immutable dataclasses, register them, validate them, execute them as runs with full lifecycle control (start / pause / resume / retry / cancel), schedule them on a cadence, and replay any run's history snapshot-by-snapshot. Every dependency — executor, scheduler, history, validator, registry, templates — is injected through abstract base classes with deterministic placeholder defaults, so the engine works out-of-the-box with zero external resources and can be upgraded component-by-component without touching orchestration code.
+
+### Architecture
+
+```mermaid
+flowchart TB
+    subgraph Kernel["Kernel / Agents"]
+        Call["register_workflow()<br/>create_run() / start() / pause()<br/>tick() / retry()"]
+    end
+
+    subgraph Engine["WorkflowEngine"]
+        Facade["High-level orchestrator"]
+    end
+
+    subgraph Core["Core Components"]
+        Registry["WorkflowRegistry"]
+        Validator["WorkflowValidator"]
+        History["WorkflowHistory"]
+        Templates["TemplateRegistry"]
+    end
+
+    subgraph Execution["Execution"]
+        Executor["BaseExecutor<br/>↳ PlaceholderExecutor"]
+        State["WorkflowState<br/>lifecycle state machine"]
+    end
+
+    subgraph Scheduling["Scheduling"]
+        Scheduler["BaseScheduler<br/>↳ InMemoryScheduler"]
+        Schedules["WorkflowSchedule[]"]
+    end
+
+    subgraph Models["Immutable Models"]
+        Def["WorkflowDefinition"]
+        Step["WorkflowStep"]
+        Run["WorkflowRun"]
+        Result["StepResult"]
+    end
+
+    Call --> Facade
+    Facade --> Registry
+    Facade --> Validator
+    Facade --> Executor
+    Facade --> Scheduler
+    Facade --> History
+    Facade --> Templates
+    Facade --> State
+    Registry --> Def
+    Def --> Step
+    Executor --> Result
+    Result --> Run
+    Scheduler --> Schedules
+    Schedules -.->|trigger| Facade
+```
+
+### Workflow lifecycle
+
+Every workflow run moves through an explicit state machine. Transitions are validated against a fixed transition table; illegal moves raise `InvalidStateTransitionError`. Terminal states cannot be left except that a `FAILED` run can be retried (which produces a *new* run in the `PENDING` state with `parent_run_id` pointing back to the original).
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING
+    PENDING --> PLANNING: start
+    PENDING --> WAITING: schedule
+    PENDING --> PAUSED: pause
+    PENDING --> CANCELLED: cancel
+    PLANNING --> RUNNING: planning_complete
+    PLANNING --> WAITING: external_signal
+    PLANNING --> FAILED: plan_error
+    PLANNING --> CANCELLED: cancel
+    WAITING --> RUNNING: resume
+    WAITING --> PAUSED: pause
+    WAITING --> CANCELLED: cancel
+    RUNNING --> PAUSED: pause
+    RUNNING --> WAITING: wait_signal
+    RUNNING --> COMPLETED: all_steps_done
+    RUNNING --> FAILED: step_failed
+    RUNNING --> CANCELLED: cancel
+    PAUSED --> RUNNING: resume
+    PAUSED --> FAILED: abort
+    PAUSED --> CANCELLED: cancel
+    FAILED --> PENDING: retry (new run)
+    FAILED --> CANCELLED: abort
+    COMPLETED --> [*]
+    CANCELLED --> [*]
+```
+
+| State | Description | Terminal? |
+|-------|-------------|-----------|
+| `PENDING` | Run created but not started. | No |
+| `PLANNING` | Engine is preparing execution. | No |
+| `WAITING` | Run is blocked on an external signal or scheduled time. | No |
+| `RUNNING` | Run is actively executing steps. | No |
+| `PAUSED` | Execution suspended; may be resumed. | No |
+| `COMPLETED` | All steps finished successfully. | Yes |
+| `FAILED` | A required step failed. Retriable. | Yes |
+| `CANCELLED` | Operator cancelled the run. | Yes |
+
+### Component table
+
+| Component | Responsibility |
+|-----------|----------------|
+| `WorkflowEngine` | Top-level orchestrator. Owns registry, executor, scheduler, history, validator, and templates. Public API: `register_workflow`, `create_run`, `start`, `pause`, `resume`, `retry`, `cancel`, `tick`, `register_schedule`, `instantiate_template`. |
+| `WorkflowState` | Eight-state lifecycle enum (`pending`, `planning`, `waiting`, `running`, `paused`, `completed`, `failed`, `cancelled`). |
+| `WorkflowStep` | Immutable dataclass: `id`, `name`, `action`, `params`, `depends_on`, `optional`. |
+| `WorkflowDefinition` | Immutable workflow definition: `id`, `name`, `version`, `steps`, `inputs`, `outputs`, `metadata`. |
+| `WorkflowRun` | Immutable run snapshot. Tracks state, inputs, step results, transitions, timing, attempts, and parent run. Updated via `dataclasses.replace`. |
+| `StepResult` | Outcome of a single step: `step_id`, `success`, `output`, `error`, `started_at`, `completed_at`. |
+| `WorkflowSchedule` | Schedule that triggers a workflow: `kind` (one_time / interval / cron), `next_run_at`, `inputs`, `enabled`. |
+| `StateTransition` | Recorded state change: `from_state`, `to_state`, `timestamp`, `reason`. |
+| `BaseExecutor` | Abstract contract: `execute_step(step, context) -> StepResult`. |
+| `PlaceholderExecutor` | Deterministic default executor with built-in `noop`, `echo`, `fail`, `wait`, `sleep` actions. Custom actions injectable. |
+| `BaseScheduler` | Abstract contract: `register`, `unregister`, `get`, `all`, `due`, `mark_run`. |
+| `InMemoryScheduler` | Deterministic in-memory scheduler supporting one_time, interval, and (placeholder) cron triggers. |
+| `WorkflowValidator` | Validates definitions: non-empty ids, unique step ids, dependency integrity, cycle detection. |
+| `WorkflowRegistry` | In-memory catalog of registered definitions. Duplicate detection via `ValueError`. |
+| `WorkflowHistory` | Append-only run snapshot store. Lookup by run id, workflow id, or recency. |
+| `WorkflowTemplate` | Parameterised factory: `builder(params) -> WorkflowDefinition`. |
+| `TemplateRegistry` | Catalog of registered templates with `instantiate(id, **params)`. |
+| `WaitSignal` | Marker output that triggers a `RUNNING -> WAITING` transition. |
+
+### Dependency graph (acyclic)
+
+The workflows package has zero circular imports. Modules form a strict DAG:
+
+```mermaid
+flowchart TB
+    state["state.py<br/>(leaf)"]
+    models["models.py<br/>(leaf)"]
+    base["base.py"]
+    validator["validator.py"]
+    registry["registry.py"]
+    history["history.py"]
+    templates["templates.py"]
+    executor["executor.py"]
+    scheduler["scheduler.py"]
+    engine["engine.py"]
+    init["__init__.py"]
+
+    base --> models
+    validator --> models
+    registry --> models
+    history --> models
+    templates --> models
+    executor --> base
+    executor --> models
+    scheduler --> base
+    scheduler --> models
+    models --> state
+    engine --> base
+    engine --> executor
+    engine --> scheduler
+    engine --> validator
+    engine --> registry
+    engine --> history
+    engine --> templates
+    engine --> models
+    engine --> state
+    init --> engine
+    init --> executor
+    init --> scheduler
+    init --> validator
+    init --> registry
+    init --> history
+    init --> templates
+    init --> models
+    init --> state
+```
+
+### Execution lifecycle
+
+1. **Register** — `engine.register_workflow(definition)` validates the definition and adds it to the registry. Duplicate ids are rejected.
+2. **Create run** — `engine.create_run(workflow_id, inputs)` produces a new `WorkflowRun` in the `PENDING` state, recorded in history.
+3. **Start** — `engine.start(run_id)` transitions `PENDING -> PLANNING -> RUNNING` (or resumes from `PAUSED`/`WAITING`) and executes steps in dependency order. Between steps the engine checks for pause requests, `WaitSignal` outputs, and step failures.
+4. **Pause / Resume** — `engine.pause(run_id)` transitions to `PAUSED` (or sets a pause-request flag if currently `RUNNING`). `engine.resume(run_id)` restarts execution from the next step.
+5. **Retry** — `engine.retry(run_id)` creates a *new* run with `parent_run_id` pointing at the failed original. The new run inherits inputs and increments `attempts`.
+6. **Cancel** — `engine.cancel(run_id)` transitions any non-terminal run to `CANCELLED`.
+7. **Schedule** — `engine.register_schedule(schedule)` registers a cadence. `engine.tick(now)` fires every due schedule, creates a run, starts it, and advances the schedule's `next_run_at`.
+
+Every state change produces a new immutable `WorkflowRun` snapshot recorded in `WorkflowHistory`. The full trajectory of any run can be replayed via `history.trajectory(run_id)`.
+
+### Execution examples
+
+**Minimal end-to-end run:**
+
+```python
+from atlas.workflows import (
+    WorkflowEngine, WorkflowDefinition, WorkflowStep,
+)
+
+engine = WorkflowEngine()
+
+definition = WorkflowDefinition(
+    id="hello_world",
+    name="Hello World",
+    steps=[
+        WorkflowStep(id="greet", name="Greet", action="noop"),
+        WorkflowStep(id="echo", name="Echo", action="echo",
+                     params={"msg": "hello"}, depends_on=["greet"]),
+    ],
+)
+engine.register_workflow(definition)
+
+run = engine.create_run("hello_world")
+run = engine.start(run.id)
+assert run.state.value == "completed"
+assert set(run.step_results) == {"greet", "echo"}
+```
+
+**Pause mid-execution:**
+
+```python
+run = engine.create_run("hello_world")
+run = engine.start(run.id, max_steps=1)   # one step, then PAUSED
+assert run.state.value == "paused"
+run = engine.resume(run.id)                # finish remaining steps
+assert run.state.value == "completed"
+```
+
+**Retry a failed run:**
+
+```python
+failing = WorkflowDefinition(
+    id="failing",
+    name="Failing",
+    steps=[WorkflowStep(id="boom", name="Boom", action="fail",
+                        params={"message": "kaboom"})],
+)
+engine.register_workflow(failing)
+
+run = engine.create_run("failing")
+run = engine.start(run.id)
+assert run.state.value == "failed"
+
+retry = engine.retry(run.id)               # new PENDING run
+assert retry.parent_run_id == run.id
+assert retry.attempts == 2
+```
+
+**Scheduled execution:**
+
+```python
+from datetime import datetime, timedelta, UTC
+from atlas.workflows import WorkflowSchedule, ScheduleKind
+
+run_at = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+engine.register_schedule(WorkflowSchedule(
+    id="daily_ping",
+    workflow_id="hello_world",
+    kind=ScheduleKind.ONE_TIME,
+    run_at=run_at,
+))
+
+started = engine.tick(now=run_at + timedelta(minutes=1))
+assert len(started) == 1
+assert started[0].state.value == "completed"
+```
+
+**Reusable template:**
+
+```python
+from atlas.workflows import linear_template
+
+template = linear_template(
+    template_id="ping_chain",
+    name="Ping Chain",
+    actions=[("a", "noop"), ("b", "noop"), ("c", "noop")],
+)
+engine.templates.register(template)
+
+definition = engine.instantiate_template("ping_chain")
+run = engine.start(engine.create_run(definition.id).id)
+assert run.state.value == "completed"
+```
+
+**Custom executor (dependency injection):**
+
+```python
+from atlas.workflows import WorkflowEngine, PlaceholderExecutor
+
+def add(params, context):
+    return params["x"] + params["y"]
+
+def multiply(params, context):
+    return context[params["source"]] * params["factor"]
+
+executor = PlaceholderExecutor(actions={"add": add, "mul": multiply})
+engine = WorkflowEngine(executor=executor)
+```
+
+Any concrete `BaseExecutor` — calling a tool, an LLM provider, a remote service — can be injected the same way without changing engine code.
 
 
 ## Atlas Provider Layer
