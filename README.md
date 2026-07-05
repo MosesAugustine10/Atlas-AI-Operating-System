@@ -222,6 +222,71 @@ flowchart LR
 | `Session` | Tracks one execution from start to finish. |
 
 
+## Atlas Live Runtime
+
+The Live Runtime replaces placeholder implementations with real execution. It wires every existing Atlas subsystem into a live execution pipeline — real providers, real MCP dispatch, live memory, live knowledge, 11 live agents, multi-agent collaboration, streaming, unified event bus, artifact management, and a FastAPI dashboard API. **No existing interfaces are broken.**
+
+### Architecture
+
+```mermaid
+flowchart TB
+    Goal([User Goal]) --> Brain["Brain.think()"]
+    Brain --> Bridge["MCPExecutorBridge"]
+    Bridge --> MCP["MCPManager → Real Connectors → External Systems"]
+    Brain --> Mem["MemoryIntegrator → MemoryEngine"]
+    Brain --> Know["KnowledgeIndexer → KnowledgeEngine"]
+    Brain --> Art["ArtifactManager"]
+    Brain --> Stream["StreamManager → LiveEventBus → WebSocket"]
+```
+
+### Component table
+
+| Component | Phase | Responsibility |
+|-----------|-------|----------------|
+| `OllamaProvider` / `OpenRouterProvider` / `ZAIProvider` | 1 | Real LLM execution via MCP connectors / HTTP |
+| `MCPExecutorBridge` | 2 | Dispatch execution tasks through MCPManager |
+| `MemoryIntegrator` | 3 | Auto-store goals, plans, reasoning, outputs, errors, lessons |
+| `KnowledgeIndexer` | 4 | Auto-index generated files (md, py, json, csv, txt, html) |
+| `LiveAgent` + 11 agents | 5 | Real agent implementations (Coding, Research, GitHub, Browser, Mining, Vision, Windows, Planner, Knowledge, Memory, Blender) |
+| `AgentCollaborator` | 6 | Multi-agent collaboration (sequential pipeline) |
+| `StreamManager` | 7 | Real-time progress streaming |
+| `LiveEventBus` | 8 | 14 event types (GoalStarted/Finished, TaskStarted/Completed, ProviderSelected/Failed, MemoryStored, KnowledgeIndexed, etc.) |
+| `ArtifactManager` | 9 | 14 artifact types (image, video, blend, python, markdown, json, csv, pdf, pptx, docx, zip, text, html, unknown) |
+| `create_app()` | 10 | FastAPI dashboard with 13 REST endpoints + WebSocket |
+
+### Example
+
+```python
+from atlas.live import LiveEventBus, MCPExecutorBridge, ArtifactManager, StreamManager
+
+# Set up the live runtime.
+bus = LiveEventBus()
+stream = StreamManager(event_bus=bus)
+artifacts = ArtifactManager()
+bridge = MCPExecutorBridge()  # uses MCPManager if injected
+
+# Execute with streaming.
+with stream.stage("researching", "Searching the web..."):
+    result = bridge.execute("research", {"url": "https://example.com"})
+    artifacts.create("report.md", content=str(result), source="research_agent")
+
+print(f"Events: {len(bus)}, Artifacts: {artifacts.count()}")
+```
+
+### Dashboard API
+
+```python
+from atlas.dashboard import create_app
+
+app = create_app()
+# Run with: uvicorn atlas.dashboard.app:app
+# Endpoints: /health /status /providers /agents /tools /workflows
+#            /memory /knowledge /events /runtime /executions /artifacts /live
+```
+
+See [`docs/live_runtime.md`](docs/live_runtime.md) for the full architecture document with all 10 phases, execution flow, and quality gates.
+
+
 ## Atlas Intelligence Layer
 
 The Intelligence Layer is the brain that connects ALL existing Atlas subsystems together. It does NOT duplicate their functionality — it orchestrates them through a single `Brain` facade with one public method: `brain.think(goal)`.
