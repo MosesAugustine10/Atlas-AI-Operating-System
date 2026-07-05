@@ -1,0 +1,79 @@
+# Atlas MCP Connector Configuration
+#
+# This file holds per-connector settings. Secrets (API keys, tokens)
+# should be read from environment variables — this file only holds
+# non-secret defaults and the names of the env vars to read.
+#
+# Every connector reads its config via atlas.mcp.connector_config.get_connector_config(name).
+
+# ---------------------------------------------------------------------------
+# Filesystem
+# ---------------------------------------------------------------------------
+filesystem:
+  root: "."  # default working directory; "." means CWD
+  max_file_size_mb: 100
+  encoding: "utf-8"
+  env_root: "ATLAS_FILESYSTEM_ROOT"  # override `root` via this env var
+
+# ---------------------------------------------------------------------------
+# GitHub
+# ---------------------------------------------------------------------------
+github:
+  # No token required for local git operations.
+  # Token is only needed for REST API calls (issues, PRs, etc.).
+  token_env: "GITHUB_TOKEN"  # env var to read the token from
+  api_base: "https://api.github.com"
+  default_branch: "main"
+  timeout_seconds: 30
+
+# ---------------------------------------------------------------------------
+# Ollama (local LLM)
+# ---------------------------------------------------------------------------
+ollama:
+  base_url: "http://localhost:11434"
+  timeout_seconds: 60
+  default_model: "llama3"
+  env_base_url: "OLLAMA_BASE_URL"  # override `base_url` via this env var
+
+# ---------------------------------------------------------------------------
+# OpenRouter (multi-model LLM gateway)
+# ---------------------------------------------------------------------------
+openrouter:
+  api_base: "https://openrouter.ai/api/v1"
+  api_key_env: "OPENROUTER_API_KEY"  # env var to read the API key from
+  default_model: "openai/gpt-4o-mini"
+  timeout_seconds: 60
+  max_retries: 3
+
+# ---------------------------------------------------------------------------
+# Browser (HTTP fetcher)
+# ---------------------------------------------------------------------------
+browser:
+  user_agent: "Atlas/1.0 (Personal AI OS)"
+  timeout_seconds: 30
+  max_redirects: 10
+  verify_ssl: true
+
+# ---------------------------------------------------------------------------
+# Playwright (browser automation)
+# ---------------------------------------------------------------------------
+playwright:
+  browser: "chromium"  # chromium / firefox / webkit
+  headless: true
+  timeout_seconds: 30
+  screenshots_dir: "./screenshots"
+
+# ---------------------------------------------------------------------------
+# Windows (OS automation)
+# ---------------------------------------------------------------------------
+windows:
+  powershell: "powershell"  # or "pwsh" for PowerShell Core
+  shell_timeout_seconds: 30
+
+# ---------------------------------------------------------------------------
+# Blender (3D automation)
+# ---------------------------------------------------------------------------
+blender:
+  blender_path: "blender"  # path to the Blender executable
+  timeout_seconds: 120
+  output_dir: "./renders"

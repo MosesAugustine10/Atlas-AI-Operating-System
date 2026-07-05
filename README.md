@@ -761,6 +761,135 @@ The MCP Layer is designed so future connectors (Slack, Notion, Linear, Figma, VS
 See [`docs/mcp_layer.md`](docs/mcp_layer.md) for the full architecture document, including connector lifecycle, transport architecture, capability routing, permission flow, health monitoring, dependency graph, and 5 usage examples.
 
 
+## Atlas Real Connectors
+
+The Real Connectors stage replaces the placeholder connector implementations from the MCP Layer with real working integrations. **The MCP architecture is unchanged** — every connector still inherits `BaseConnector` and exposes the same `_do_connect` / `_do_disconnect` / `_do_health` / `_do_execute` contract. Only the internal logic has been replaced.
+
+### Architecture
+
+```mermaid
+flowchart TB
+    Manager["MCPManager"] --> Registry["MCPRegistry"]
+    Registry --> FS["Filesystem<br/>(pathlib, shutil, zipfile)"]
+    Registry --> GH["GitHub<br/>(GitPython, requests)"]
+    Registry --> OL["Ollama<br/>(requests HTTP)"]
+    Registry --> OR["OpenRouter<br/>(requests HTTP)"]
+    Registry --> BR["Browser<br/>(requests Session)"]
+    Registry --> PW["Playwright<br/>(playwright sync API)"]
+    Registry --> WN["Windows<br/>(subprocess)"]
+    Registry --> BL["Blender<br/>(subprocess CLI)"]
+    YAML["connectors.yaml"] -.->|config| FS
+    YAML -.->|config| GH
+    YAML -.->|config| OL
+    YAML -.->|config| OR
+    YAML -.->|config| BR
+    YAML -.->|config| PW
+    YAML -.->|config| WN
+    YAML -.->|config| BL
+    Env["Environment variables"] -.->|secrets| YAML
+```
+
+### Configuration
+
+All connector configuration lives in `atlas/configs/connectors.yaml`. Secrets (API keys, tokens) are read from environment variables — the YAML only holds non-secret defaults and the names of the env vars to read.
+
+| Connector | Env var | Purpose |
+|-----------|---------|---------|
+| Filesystem | `ATLAS_FILESYSTEM_ROOT` | Override root directory |
+| Ollama | `OLLAMA_BASE_URL` | Override Ollama server URL |
+| GitHub | `GITHUB_TOKEN` | REST API authentication |
+| OpenRouter | `OPENROUTER_API_KEY` | API authentication |
+
+### Connector table
+
+| Connector | Implementation | Capabilities | External dependency |
+|-----------|---------------|-------------|---------------------|
+| `FilesystemConnector` | `pathlib`, `shutil`, `zipfile` | 15 (read, write, append, copy, move, rename, delete, exists, search, list, mkdir, watch, zip, extract, path) | None |
+| `GitHubConnector` | GitPython + `requests` | 17 (clone, status, branch, checkout, commit, push, pull, fetch, log, diff, tag, remote, repo.list/get, issue.list/create, pr.create) | `git` CLI (optional token for REST) |
+| `OllamaConnector` | `requests` HTTP | 8 (health, models, pull, delete, generate, chat, embed, stream) | Ollama server running locally |
+| `OpenRouterConnector` | `requests` HTTP | 5 (health, models, chat, generate, usage) | OpenRouter API key |
+| `BrowserConnector` | `requests.Session` | 6 (navigate, download, html, cookies, headers, session) | None |
+| `PlaywrightConnector` | `playwright` sync API | 11 (launch, goto, click, type, upload, download, wait, screenshot, pdf, close, evaluate) | `playwright` package + browser install |
+| `WindowsConnector` | `subprocess` | 8 (shell, powershell, env.get/set, process.list/kill, app.launch, clipboard) | PowerShell (optional) |
+| `BlenderConnector` | `subprocess` CLI | 10 (launch, script, open, save, render, render_animation, execute, scene.new, object.add, export) | Blender executable |
+
+### Examples
+
+**Filesystem — write and read a file:**
+
+```python
+from atlas.mcp import MCPManager, FilesystemConnector
+
+manager = MCPManager()
+manager.register_connector(FilesystemConnector(root="/tmp/atlas"))
+session = manager.open_session("filesystem", permissions=["read", "write"])
+manager.execute_capability("file.write", {"path": "test.txt", "content": "hello"},
+                           connector="filesystem", session_id=session.id)
+resp = manager.execute_capability("file.read", {"path": "test.txt"},
+                                  connector="filesystem", session_id=session.id)
+print(resp.output["content"])  # "hello"
+```
+
+**GitHub — local git status (no token needed):**
+
+```python
+from atlas.mcp import MCPManager, GitHubConnector
+
+manager = MCPManager()
+manager.register_connector(GitHubConnector())
+session = manager.open_session("github", permissions=["read"])
+resp = manager.execute_capability("git.status", {"path": "/path/to/repo"},
+                                  connector="github", session_id=session.id)
+print(resp.output["active_branch"], resp.output["is_dirty"])
+```
+
+**Ollama — generate text:**
+
+```python
+from atlas.mcp import MCPManager, OllamaConnector
+
+manager = MCPManager()
+manager.register_connector(OllamaConnector())
+session = manager.open_session("ollama", permissions=["read"])
+resp = manager.execute_capability(
+    "ollama.generate", {"prompt": "Write a haiku", "model": "llama3"},
+    connector="ollama", session_id=session.id,
+)
+print(resp.output["response"])
+```
+
+**OpenRouter — chat completion:**
+
+```python
+import os
+os.environ["OPENROUTER_API_KEY"] = "sk-or-xxxxx"
+from atlas.mcp import MCPManager, OpenRouterConnector
+
+manager = MCPManager()
+manager.register_connector(OpenRouterConnector())
+session = manager.open_session("openrouter", permissions=["read"])
+resp = manager.execute_capability(
+    "openrouter.chat",
+    {"messages": [{"role": "user", "content": "Hello!"}]},
+    connector="openrouter", session_id=session.id,
+)
+print(resp.output["message"]["content"])
+```
+
+### Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| "git CLI not available" | Install git: `apt install git` |
+| "Blender is not installed" | Install Blender, ensure it's on `PATH` |
+| "Playwright is not installed" | `pip install playwright && playwright install` |
+| "OpenRouter API key required" | `export OPENROUTER_API_KEY="sk-or-xxxxx"` |
+| "Ollama connection refused" | Start Ollama: `ollama serve` |
+| "PowerShell is not available" | Install PowerShell Core (`pwsh`) |
+
+See [`docs/real_connectors.md`](docs/real_connectors.md) for the full architecture document, configuration reference, every connector's capabilities, and troubleshooting guide.
+
+
 ## Atlas Runtime Engine
 
 The Runtime Engine is the execution heart of the Atlas AI Operating System. It accepts user requests, builds an execution context, opens a session, dispatches workflows and agents, executes steps, selects providers, invokes tools, emits lifecycle events, updates the Memory and Knowledge engines, triggers Reflection, and returns the final response. Every concrete concern is injected through an abstract base class, so the runtime is **provider-agnostic**, **tool-agnostic**, **agent-agnostic**, and **workflow-agnostic**. The default configuration uses deterministic in-memory placeholders so the runtime works out-of-the-box with zero external dependencies.
