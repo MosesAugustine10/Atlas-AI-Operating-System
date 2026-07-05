@@ -222,6 +222,103 @@ flowchart LR
 | `Session` | Tracks one execution from start to finish. |
 
 
+## Atlas Studio
+
+Atlas Studio is the **professional desktop application** that visualizes and controls every Atlas subsystem. Built with PySide6 (Qt6), it provides a dark-themed, multi-panel, tabbed workspace with live dashboards, embedded browser, integrated terminal, and real-time event streaming.
+
+**Personal**: Single operator only. **Offline-first**: Works without network. **MVVM**: Model and ViewModel layers have zero Qt imports — fully testable headlessly.
+
+### Architecture
+
+```mermaid
+flowchart TB
+    User([Operator]) --> View["View Layer (Qt Widgets)"]
+    View --> ViewModel["ViewModel Layer (Controllers)"]
+    ViewModel --> Model["Model Layer (Dataclasses)"]
+    ViewModel --> Subsystems["Atlas Subsystems"]
+    Subsystems --> EventRelay["EventRelay → View"]
+```
+
+### UI Layout
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ Left Sidebar │   Center Workspace (Tabs)   │ Right Sidebar │
+│              │                              │               │
+│  Chat        │  ┌─────────────────────────┐│ Timeline      │
+│  Projects    │  │ Tab 1 │ Tab 2 │ Tab 3  ││ Current Goal  │
+│  Agents      │  ├─────────────────────────┤│ Agents        │
+│  Providers   │  │                         ││ Artifacts     │
+│  Memory      │  │   Page Content          ││ Notifications │
+│  Knowledge   │  │                         ││               │
+│  Workflows   │  │                         ││               │
+│  Executions  │  └─────────────────────────┘│               │
+│  Artifacts   │                              │               │
+│  Skills      ├──────────────────────────────┤               │
+│  Tools       │  Logs │ Terminal │ Events    │               │
+│  MCP         │  Bottom Panel                │               │
+│  Browser     │                              │               │
+│  Blender     │                              │               │
+│  Mining      │                              │               │
+│  Logs        │                              │               │
+│  Settings    │                              │               │
+└──────────────────────────────────────────────────────────┘
+```
+
+### Component table
+
+| Component | Layer | Responsibility |
+|-----------|-------|----------------|
+| `NavigationModel` | ViewModel | 17 pages across 4 categories (Main, Monitoring, Tools, System) |
+| `WorkspaceModel` | ViewModel | Tabbed workspace with pin, reorder, split |
+| `StudioSettings` | Model | YAML settings (theme, fonts, API keys, paths) |
+| `EventRelay` | ViewModel | Bridges LiveEventBus to Studio UI |
+| `ChatController` | ViewModel | ChatGPT-like chat with Brain/Providers |
+| `SystemController` | ViewModel | CPU, RAM, GPU, disk, network metrics |
+| `ProviderController` | ViewModel | Provider health, models, latency |
+| `AgentController` | ViewModel | Agent status, running, queue |
+| `MCPController` | ViewModel | Connector health, capabilities, permissions |
+| `ExecutionController` | ViewModel | Execution timeline, pipeline, history |
+| `ArtifactController` | ViewModel | Artifact search, filter, delete |
+| `MemoryController` | ViewModel | Memory search, categories, count |
+| `KnowledgeController` | ViewModel | Document search, chunks, count |
+| `PluginController` | ViewModel | Register/enable/disable plugin pages |
+| `MainWindow` | View | Professional desktop layout (Qt) |
+| `StudioApp` | View | Entry point (QApplication) |
+
+### Example
+
+```python
+from atlas.studio.navigation import NavigationModel
+from atlas.studio.workspace import WorkspaceModel
+from atlas.studio.models import PageId
+
+# Navigate to a page
+nav = NavigationModel()
+nav.set_current(PageId.AGENTS)
+
+# Open a tab in the workspace
+ws = WorkspaceModel()
+ws.open_tab(PageId.CHAT, "Chat")
+ws.open_tab(PageId.AGENTS, "Agents")
+print(f"Open tabs: {len(ws.tabs())}")
+```
+
+### Plugin system
+
+Adding a new page (Mining Studio, Video Studio, Voice Studio) requires only registering a `PageInfo`:
+
+```python
+nav.add_page(PageInfo(
+    id=PageId.MINING, title="Mining Studio",
+    icon="pickaxe", description="Mining data studio",
+    category=NavigationCategory.TOOLS, position=0,
+))
+```
+
+See [`docs/studio.md`](docs/studio.md) for the full architecture document with MVVM explanation, UI diagrams, plugin system, and quality gates.
+
+
 ## Atlas Live Runtime
 
 The Live Runtime replaces placeholder implementations with real execution. It wires every existing Atlas subsystem into a live execution pipeline — real providers, real MCP dispatch, live memory, live knowledge, 11 live agents, multi-agent collaboration, streaming, unified event bus, artifact management, and a FastAPI dashboard API. **No existing interfaces are broken.**
