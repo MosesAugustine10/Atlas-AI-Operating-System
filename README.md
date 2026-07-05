@@ -24,6 +24,18 @@ Together, these form a coherent operating environment in which an AI can work wi
 
 ```
 atlas/
+├── intelligence/  # Intelligence Layer (brain that orchestrates all subsystems)
+│   ├── brain.py        # Brain facade: think(goal) → 12-stage pipeline
+│   ├── goal_manager.py # GoalManager: concurrent goals, pause/resume/cancel
+│   ├── task_decomposer.py  # TaskDecomposer: recursive goal decomposition
+│   ├── reasoner.py     # Reasoner: 6-step reasoning chains
+│   ├── planner.py      # AdaptivePlanner: split/merge/remove/insert/reorder
+│   ├── decision.py     # DecisionEngine: capability-based selection
+│   ├── reflection.py   # ReflectionEngine: expected vs actual, lessons
+│   ├── critic.py       # Critic: warnings, confidence, quality score
+│   ├── learning.py     # LearningEngine: learn from history
+│   ├── coordinator.py  # Coordinator: wires all Atlas subsystems
+│   └── models.py       # Frozen dataclasses (Goal, ReasoningChain, etc.)
 ├── mcp/           # MCP Layer (universal communication backbone, 17 connectors)
 │   ├── manager.py       # MCPManager top-level orchestrator
 │   ├── base.py          # BaseConnector abstract contract
@@ -208,6 +220,107 @@ flowchart LR
 | `State` | Represents the current execution phase and history. |
 | `Context` | Carries request + memory + knowledge + config through the pipeline. |
 | `Session` | Tracks one execution from start to finish. |
+
+
+## Atlas Intelligence Layer
+
+The Intelligence Layer is the brain that connects ALL existing Atlas subsystems together. It does NOT duplicate their functionality — it orchestrates them through a single `Brain` facade with one public method: `brain.think(goal)`.
+
+### Architecture
+
+```mermaid
+flowchart TB
+    Goal([Goal]) --> Brain
+
+    subgraph Intelligence["Intelligence Layer"]
+        Brain["Brain<br/>(top-level facade)"]
+        GM["GoalManager"]
+        R["Reasoner"]
+        P["AdaptivePlanner"]
+        D["DecisionEngine"]
+        C["Critic"]
+        RE["ReflectionEngine"]
+        L["LearningEngine"]
+        CO["Coordinator"]
+    end
+
+    subgraph Subsystems["Atlas Subsystems (orchestrated)"]
+        Exec["Execution Engine"]
+        WF["Workflow Engine"]
+        RT["Runtime"]
+        Prov["Provider Layer"]
+        MCP["MCP Layer"]
+        Mem["Memory Engine"]
+        Know["Knowledge Engine"]
+    end
+
+    Brain --> GM
+    Brain --> R
+    Brain --> P
+    Brain --> D
+    Brain --> C
+    Brain --> RE
+    Brain --> L
+    Brain --> CO
+    CO -.->|coordinates| Exec
+    CO -.->|coordinates| WF
+    CO -.->|coordinates| RT
+    CO -.->|coordinates| Prov
+    CO -.->|coordinates| MCP
+    CO -.->|coordinates| Mem
+    CO -.->|coordinates| Know
+```
+
+### Thinking pipeline
+
+```mermaid
+flowchart TB
+    Goal[Understand Goal] --> Knowledge[Search Knowledge]
+    Knowledge --> Memory[Recall Memory]
+    Memory --> Reason[Reason]
+    Reason --> Plan[Plan]
+    Plan --> Choose[Choose Agents/Providers/Tools]
+    Choose --> Execute[Execute]
+    Execute --> Review[Review]
+    Review --> Reflect[Reflect]
+    Reflect --> Learn[Learn]
+    Learn --> UpdateMemory[Update Memory]
+    UpdateMemory --> Report[Return Report]
+```
+
+### Component table
+
+| Component | Responsibility |
+|-----------|----------------|
+| `Brain` | Top-level facade. Public API: `think(goal)`, `think_many(goals)`, `status()`. Runs the 12-stage thinking pipeline. |
+| `GoalManager` | Tracks multiple concurrent goals with lifecycle (create, start, pause, resume, cancel, complete, fail). Priority updates. Dependency tracking. |
+| `TaskDecomposer` | Recursively breaks complex goals into sub-goals. Pattern-based (website, research, code, deploy, analyze). |
+| `Reasoner` | Builds reasoning chains using Knowledge, Memory, and Provider. 6-step pattern: observe → hypothesize → deduce → infer → evaluate → decide. |
+| `AdaptivePlanner` | Generates adaptive plans that can split, merge, remove, insert, and reorder tasks. |
+| `DecisionEngine` | Capability-based selection of providers, agents, tools, workflows, and MCP connectors. Scores by availability, quality, cost, latency, and history. |
+| `Critic` | Reviews outputs. Produces warnings, confidence, and quality score. |
+| `ReflectionEngine` | Compares expected vs actual. Detects mistakes. Extracts lessons. Recommends retry. |
+| `LearningEngine` | Stores and retrieves lessons. Writes to memory. Produces learning summaries. |
+| `Coordinator` | Coordinates Execution Engine, Workflow Engine, Runtime, Provider Layer, Agent Framework, MCP, Memory, and Knowledge. |
+
+### Example
+
+```python
+from atlas.intelligence import Brain
+
+brain = Brain()
+outcome = brain.think("Create a website for my portfolio")
+print(outcome.status.value)     # "completed"
+print(outcome.success)          # True
+print(len(outcome.plan.tasks))  # 5
+print(len(outcome.reasoning.steps))  # 6
+```
+
+### Failure handling
+
+If any stage of the pipeline raises an exception, the `Brain` catches it, marks the goal as `FAILED`, and returns an `ExecutionOutcome` with the error message. The goal manager records the failure in history.
+
+See [`docs/intelligence_layer.md`](docs/intelligence_layer.md) for the full architecture document, including the reasoning pipeline, reflection loop, learning loop, decision tree, dependency graph, and 7 usage examples.
 
 
 ## Atlas Integration Layer
