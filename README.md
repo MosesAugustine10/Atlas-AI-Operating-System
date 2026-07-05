@@ -2125,6 +2125,147 @@ The router supports four strategies, all of which respect availability and capab
 Two providers — **Ollama** and **LM Studio** — are designed for fully local execution. They run models on the user's own hardware with zero per-token cost and no data leaving the machine. The Provider Layer treats them identically to cloud providers, so Atlas can operate in a **fully air-gapped mode** by registering only local providers. This is foundational to Atlas's commitment to operator sovereignty: the choice of where intelligence runs belongs to the operator, not the platform.
 
 
+## Phase 1 — Real Qt Application
+
+The `atlas/app/` package is the **single composition root** for the Atlas desktop application. It wires together every existing subsystem into one executable Qt application — no placeholder pages, no stub widgets.
+
+### What's in this phase
+
+* **`AtlasApp`** (`atlas/app/bootstrap.py`) — the bootstrap that owns every controller and the Qt application. Accepts injected subsystems (Brain, ProviderManager, MCPManager, MemoryEngine, KnowledgeEngine, agent registry, artifact manager) and wires them into the corresponding controllers.
+* **`MainWindow`** (`atlas/app/main_window.py`) — the real `PySide6.QtWidgets.QMainWindow` with a sidebar, a `QStackedWidget` hosting one real page per `PageId`, a top bar with search and command-palette buttons, and a status bar showing the current phase.
+* **`SidebarWidget`** (`atlas/app/widgets/sidebar.py`) — the real navigation sidebar that renders `NavigationModel` grouped by `NavigationCategory`, with active-page highlighting and click-to-navigate.
+* **12 real page widgets** in `atlas/app/pages/`, each using an existing controller from `atlas.studio.controllers`:
+  * `ChatPage` → `ChatController` (conversation, provider/agent selectors, send/clear)
+  * `AgentsPage` → `AgentController`
+  * `ProvidersPage` → `ProviderController`
+  * `MemoryPage` → `MemoryController` (with search)
+  * `KnowledgePage` → `KnowledgeController` (with search)
+  * `ExecutionPage` → `ExecutionController`
+  * `ArtifactsPage` → `ArtifactController` (with search)
+  * `MCPPage` → `MCPController`
+  * `SystemPage` → `SystemController`
+  * `LogsPage`, `ToolsPage`, `SettingsPage` — info pages
+
+### Starting the application
+
+From the CLI:
+
+```bash
+atlas launch              # start the Qt app (requires PySide6)
+atlas launch --headless   # boot controllers without Qt (for testing)
+atlas status              # print wiring status
+```
+
+Programmatically:
+
+```python
+from atlas.app import AtlasApp
+
+app = AtlasApp(
+    brain=my_brain,
+    providers=my_provider_manager,
+    memory=my_memory_engine,
+    knowledge=my_knowledge_engine,
+)
+app.run()  # enters the Qt event loop
+```
+
+Or run the example:
+
+```bash
+python examples/launch_atlas.py
+```
+
+### Graceful degradation
+
+The application is **importable on any host** — even headless CI boxes without PySide6. On Qt-bearing hosts the full UI is available; on headless hosts every View class (`MainWindow`, `SidebarWidget`, every page) is importable but raises `ImportError` on instantiation. The `AtlasApp.controllers` dict is always available so tests can verify wiring without Qt.
+
+### Architecture
+
+```mermaid
+flowchart TB
+    subgraph CLI["CLI (atlas/main.py)"]
+        Launch["atlas launch"]
+        Status["atlas status"]
+    end
+
+    subgraph App["atlas/app (Phase 1)"]
+        Bootstrap["AtlasApp<br/>bootstrap"]
+        Window["MainWindow<br/>QMainWindow"]
+        Sidebar["SidebarWidget"]
+        Stack["QStackedWidget"]
+    end
+
+    subgraph Pages["Page widgets (12 pages)"]
+        Chat["ChatPage"]
+        Memory["MemoryPage"]
+        Knowledge["KnowledgePage"]
+        Execution["ExecutionPage"]
+        Agents["AgentsPage"]
+        Providers["ProvidersPage"]
+        MCP["MCPPage"]
+        Artifacts["ArtifactsPage"]
+        System["SystemPage"]
+        Logs["LogsPage"]
+        Tools["ToolsPage"]
+        Settings["SettingsPage"]
+    end
+
+    subgraph Controllers["atlas.studio.controllers (existing)"]
+        ChatCtrl["ChatController"]
+        MemCtrl["MemoryController"]
+        KnowCtrl["KnowledgeController"]
+        ExecCtrl["ExecutionController"]
+        AgentCtrl["AgentController"]
+        ProvCtrl["ProviderController"]
+        MCPCtrl["MCPController"]
+        ArtCtrl["ArtifactController"]
+        SysCtrl["SystemController"]
+    end
+
+    subgraph Subsystems["Atlas subsystems (injected)"]
+        Brain["Brain"]
+        Providers["ProviderManager"]
+        MCP["MCPManager"]
+        Memory["MemoryEngine"]
+        Knowledge["KnowledgeEngine"]
+    end
+
+    CLI --> Bootstrap
+    Bootstrap --> Window
+    Window --> Sidebar
+    Window --> Stack
+    Stack --> Pages
+    Pages --> Controllers
+    Controllers --> Subsystems
+```
+
+### Test coverage
+
+The phase ships **90 dedicated tests** in `tests/test_app.py`, covering:
+
+* Package imports and `has_qt` detection.
+* `AtlasApp` construction, controller wiring, status reporting, and subsystem injection.
+* `MainWindow` and `SidebarWidget` graceful-degradation (raise `ImportError` on headless hosts).
+* All 12 page widgets — importable on headless hosts, raise `ImportError` on instantiation.
+* `NavigationModel` — every `PageId` used by the `MainWindow` exists.
+* CLI commands (`atlas`, `atlas --version`, `atlas status`, `atlas launch --headless`).
+* Controller wiring — every page is wired to a real controller instance with the expected methods.
+* End-to-end scenarios (full boot + controller access; chat send with brain; navigation completeness; multiple-app construction; status reflects wiring).
+* No-circular-imports test that walks `atlas/app/` source to verify no `from atlas.<subsystem>` imports (only `atlas.studio` is allowed).
+* Example launcher (`examples/launch_atlas.py`) is importable and runs in headless mode.
+
+### Reuse guarantee
+
+The `atlas/app/` package does **not** duplicate any backend logic. It only:
+
+1. Instantiates existing controllers from `atlas.studio.controllers`.
+2. Injects existing subsystems (Brain, ProviderManager, MCPManager, MemoryEngine, KnowledgeEngine) via constructor parameters.
+3. Builds Qt widgets that call into those controllers.
+
+A dedicated test (`test_import_app_does_not_import_other_subsystems`) walks the package source and verifies no `from atlas.<subsystem>` imports exist — only `atlas.studio` (controllers + models + navigation) is allowed.
+
+
 ## Getting Started
 
 1. **Read the identity.** Start with [`atlas/core/Identity.md`](atlas/core/Identity.md) to understand who Atlas is.
