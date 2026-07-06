@@ -142,8 +142,16 @@ class AtlasApp:
             knowledge=pipeline.knowledge,
         )
         app.pipeline = pipeline
+        # Wire the chat controller with the real providers so chat
+        # actually calls an LLM instead of returning placeholders.
+        app.controllers["chat"] = ChatController(
+            brain=pipeline.brain,
+            providers=pipeline.providers,
+        )
         # Also wire execution controller with the real brain
         app.controllers["execution"] = ExecutionController(brain=pipeline.brain)
+        # Wire providers controller with the real manager
+        app.controllers["providers"] = ProviderController(manager=pipeline.providers)
         return app
 
     # ------------------------------------------------------------------

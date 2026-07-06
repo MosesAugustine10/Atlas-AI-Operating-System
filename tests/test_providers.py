@@ -156,23 +156,23 @@ def test_registry_get_unknown_returns_none() -> None:
 
 def test_router_auto_selects_lowest_priority() -> None:
     reg = ProviderRegistry()
-    reg.register(OpenAIProvider())  # priority 10
-    reg.register(ZAIProvider())  # priority 5
+    reg.register(OpenAIProvider())  # priority 10 (lowest = highest priority)
+    reg.register(ZAIProvider())  # priority 20
     router = ProviderRouter(reg)
     selected = router.select()
-    assert selected.name == "zai"
+    assert selected.name == "openai"
 
 
 def test_router_auto_skips_unavailable() -> None:
     reg = ProviderRegistry()
-    zai = ZAIProvider()
-    zai.set_available(False)
     oai = OpenAIProvider()
+    oai.set_available(False)
+    zai = ZAIProvider()
     reg.register(zai)
     reg.register(oai)
     router = ProviderRouter(reg)
     selected = router.select()
-    assert selected.name == "openai"
+    assert selected.name == "zai"
 
 
 def test_router_auto_none_when_all_unavailable() -> None:
@@ -238,10 +238,10 @@ def test_router_capability_filter() -> None:
 def test_router_capability_images() -> None:
     reg = ProviderRegistry()
     reg.register(GroqProvider())  # images=False
-    reg.register(GeminiProvider())  # images=True
+    reg.register(OpenAIProvider())  # images=True
     router = ProviderRouter(reg)
     selected = router.select(require=ProviderCapability(images=True))
-    assert selected.name == "gemini"
+    assert selected.name == "openai"
 
 
 def test_router_round_robin_rotates() -> None:
@@ -321,7 +321,7 @@ def test_manager_list_models_all() -> None:
     mgr.register(ZAIProvider())
     mgr.register(OllamaProvider())
     models = mgr.list_models()
-    assert "zai-default" in models["zai"]
+    assert "glm-4-plus" in models["zai"]
     assert "llama3.2" in models["ollama"]
 
 
@@ -467,7 +467,7 @@ def test_manager_fallback_via_router() -> None:
 
 
 def test_manager_all_unavailable_raises() -> None:
-    mgr = ProviderManager()
+    mgr = ProviderManager(max_retries=1)
     zai = ZAIProvider()
     zai.set_available(False)
     mgr.register(zai)

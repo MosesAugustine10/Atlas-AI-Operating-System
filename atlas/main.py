@@ -31,20 +31,35 @@ def _cmd_launch(argv: list[str]) -> int:
         action="store_true",
         help="boot controllers without starting the Qt event loop",
     )
+    parser.add_argument(
+        "--no-pipeline",
+        action="store_true",
+        help="skip wiring the real AI pipeline (use empty controllers)",
+    )
     args = parser.parse_args(argv)
 
     from atlas.app import AtlasApp, has_qt
 
-    app = AtlasApp()
+    # Use the real pipeline by default so brain.think() actually executes.
+    # Pass --no-pipeline for a lightweight boot without subsystem wiring.
+    if args.no_pipeline:
+        app = AtlasApp()
+    else:
+        app = AtlasApp.with_pipeline()
+
     if args.headless or not has_qt():
-        # Headless mode — just report wiring status
-        print("Atlas (headless mode)")
+        # Headless mode — report wiring status
+        print("Atlas AI Operating System")
         print(f"  Qt available: {app.is_qt_available()}")
         print(f"  Controllers: {', '.join(app.controller_names())}")
         status = app.status()
         for key, value in status.items():
             if key != "controllers":
                 print(f"  {key}: {value}")
+        if app.pipeline is not None:
+            p_status = app.pipeline.status()
+            print(f"  Pipeline providers: {p_status['providers']['registered']}")
+            print(f"  Pipeline health: {p_status['providers']['health']}")
         return 0
 
     # Qt mode — start the event loop
@@ -56,14 +71,20 @@ def _cmd_status(argv: list[str]) -> int:
     """Handle ``atlas status`` — print wiring status."""
     from atlas.app import AtlasApp
 
-    app = AtlasApp()
+    app = AtlasApp.with_pipeline()
     status = app.status()
-    print("Atlas wiring status:")
+    print("Atlas AI Operating System — Status")
+    print(f"  Version: {__version__}")
     for key, value in status.items():
         if key == "controllers":
-            print(f"  controllers: {', '.join(value)}")
+            print(f"  Controllers: {', '.join(value)}")
         else:
             print(f"  {key}: {value}")
+    if app.pipeline is not None:
+        p_status = app.pipeline.status()
+        print(f"  Pipeline providers: {p_status['providers']['registered']}")
+        print(f"  Provider health: {p_status['providers']['health']}")
+        print(f"  Brain: {p_status['brain']}")
     return 0
 
 

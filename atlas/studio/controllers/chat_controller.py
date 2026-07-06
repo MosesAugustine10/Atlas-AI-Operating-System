@@ -109,6 +109,53 @@ class ChatController:
         self.streaming = False
 
     # ------------------------------------------------------------------
+    # Streaming
+    # ------------------------------------------------------------------
+
+    def send_stream(self, text: str) -> Any:
+        """Send ``text`` and yield streaming response chunks.
+
+        This is the streaming variant of :meth:`send`. It appends the
+        user message, then yields response chunks from the provider's
+        ``stream()`` method. The final accumulated text is appended as
+        an assistant message when the stream ends.
+
+        Yields :class:`ProviderResponse` chunks (or strings when the
+        underlying subsystem doesn't support streaming).
+        """
+        if not text:
+            return
+        self.messages.append({"role": "user", "content": text, "timestamp": _utcnow()})
+        self.streaming = True
+        accumulated: list[str] = []
+        try:
+            if self._providers is not None and hasattr(self._providers, "stream"):
+                for chunk in self._providers.stream(
+                    text, provider=self.provider or None
+                ):
+                    chunk_text = self._extract_text(chunk)
+                    if chunk_text:
+                        accumulated.append(chunk_text)
+                    yield chunk
+            elif self._brain is not None and _is_runnable(self._brain):
+                result = str(self._call_runnable(self._brain, text))
+                accumulated.append(result)
+                yield result
+            else:
+                msg = "[no provider or agent available]"
+                accumulated.append(msg)
+                yield msg
+        finally:
+            self.streaming = False
+            self.messages.append(
+                {
+                    "role": "assistant",
+                    "content": "".join(accumulated),
+                    "timestamp": _utcnow(),
+                }
+            )
+
+    # ------------------------------------------------------------------
     # Export & selection
     # ------------------------------------------------------------------
 
