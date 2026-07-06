@@ -33,6 +33,12 @@ def create_app(
     event_bus: Any = None,
     artifact_manager: Any = None,
     stream_manager: Any = None,
+    system_controller: Any = None,
+    workforce: Any = None,
+    collaboration: Any = None,
+    execution: Any = None,
+    creator_pipeline: Any = None,
+    evaluation: Any = None,
 ) -> Any:
     """Create a FastAPI application wired to Atlas subsystems.
 
@@ -45,10 +51,12 @@ def create_app(
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
 
+    from atlas.dashboard.collector import DashboardDataCollector
+
     app = FastAPI(
         title="Atlas Dashboard API",
         description="Backend API for the Atlas AI Operating System",
-        version="1.0.0",
+        version="2.0.0",
     )
     app.add_middleware(
         CORSMiddleware,
@@ -59,6 +67,21 @@ def create_app(
 
     logger = get_logger("dashboard")
 
+    # Build the data collector that aggregates real metrics.
+    collector = DashboardDataCollector(
+        system_controller=system_controller,
+        providers=provider_manager,
+        workforce=workforce,
+        collaboration=collaboration,
+        execution=execution,
+        memory=memory,
+        knowledge=knowledge,
+        mcp=mcp_manager,
+        creator_pipeline=creator_pipeline,
+        evaluation=evaluation,
+        event_bus=event_bus,
+    )
+
     # Store subsystems in app state.
     app.state.brain = brain
     app.state.mcp = mcp_manager
@@ -68,6 +91,7 @@ def create_app(
     app.state.event_bus = event_bus
     app.state.artifacts = artifact_manager
     app.state.stream = stream_manager
+    app.state.collector = collector
 
     # ------------------------------------------------------------------
     # Health
@@ -365,6 +389,88 @@ def create_app(
                 for e in history[-10:]
             ]
         }
+
+    # ------------------------------------------------------------------
+    # Professional Dashboard Endpoints (v2.0)
+    # ------------------------------------------------------------------
+
+    @app.get("/dashboard/system")
+    async def dashboard_system() -> dict[str, Any]:
+        """Return real CPU, RAM, GPU, disk, network, process metrics."""
+        return collector.system_metrics()
+
+    @app.get("/dashboard/ai")
+    async def dashboard_ai() -> dict[str, Any]:
+        """Return real provider, model, token, and cost metrics."""
+        return collector.ai_metrics()
+
+    @app.get("/dashboard/workforce")
+    async def dashboard_workforce() -> dict[str, Any]:
+        """Return real worker, task, and productivity metrics."""
+        return collector.workforce_metrics()
+
+    @app.get("/dashboard/execution")
+    async def dashboard_execution() -> dict[str, Any]:
+        """Return real workflow, task, and pipeline metrics."""
+        return collector.execution_metrics()
+
+    @app.get("/dashboard/memory")
+    async def dashboard_memory() -> dict[str, Any]:
+        """Return real memory store metrics."""
+        return collector.memory_metrics()
+
+    @app.get("/dashboard/knowledge")
+    async def dashboard_knowledge() -> dict[str, Any]:
+        """Return real knowledge engine metrics."""
+        return collector.knowledge_metrics()
+
+    @app.get("/dashboard/mcp")
+    async def dashboard_mcp() -> dict[str, Any]:
+        """Return real MCP connector metrics."""
+        return collector.mcp_metrics()
+
+    @app.get("/dashboard/creator")
+    async def dashboard_creator() -> dict[str, Any]:
+        """Return real creator pipeline metrics."""
+        return collector.creator_metrics()
+
+    @app.get("/dashboard/evaluation")
+    async def dashboard_evaluation() -> dict[str, Any]:
+        """Return real evaluation metrics."""
+        return collector.evaluation_metrics()
+
+    @app.get("/dashboard/logs")
+    async def dashboard_logs(
+        level: str | None = None,
+        search: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """Return log entries with optional filtering."""
+        return {"logs": collector.logs(level=level, search=search, limit=limit)}
+
+    @app.post("/dashboard/logs")
+    async def dashboard_add_log(
+        level: str, message: str, source: str = ""
+    ) -> dict[str, Any]:
+        """Add a log entry."""
+        collector.add_log(level=level, message=message, source=source)
+        return {"status": "ok"}
+
+    @app.get("/dashboard/logs/export")
+    async def dashboard_export_logs() -> dict[str, Any]:
+        """Export all log entries."""
+        return {"logs": collector.export_logs()}
+
+    @app.delete("/dashboard/logs")
+    async def dashboard_clear_logs() -> dict[str, Any]:
+        """Clear all logs."""
+        count = collector.clear_logs()
+        return {"cleared": count}
+
+    @app.get("/dashboard/all")
+    async def dashboard_all() -> dict[str, Any]:
+        """Return every dashboard section at once."""
+        return collector.collect_all()
 
     return app
 
