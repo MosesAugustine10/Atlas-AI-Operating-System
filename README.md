@@ -2550,6 +2550,90 @@ The phase ships **269 dedicated tests** in `tests/test_workforce.py`, covering:
 * A no-brain-import test that walks the package source to verify no Atlas-subsystem imports.
 
 
+## Phase 7 — Atlas Creator AI Pipeline
+
+The `atlas/creator_pipeline/` package is the **autonomous content creation pipeline** that transforms ONE user goal into a complete professional media project. A single prompt like "Create a YouTube documentary about SpaceX" automatically executes 18 stages: Research → Fact Check → Script → Storyboard → Shot Plan → Prompt Gen → Image Gen → Video Gen → Voice Synth → Music Select → Subtitle Gen → Timeline Assembly → Render → Quality Review → Thumbnail Gen → Metadata Gen → SEO Optimize → Package.
+
+### Architecture
+
+The pipeline sits ABOVE the Collaboration Engine and reuses every existing Atlas subsystem through dependency injection — it NEVER imports Brain, Workforce, Collaboration, or any subsystem directly.
+
+```mermaid
+flowchart TB
+    subgraph User["User"]
+        Goal["Creative goal"]
+    end
+
+    subgraph Pipeline["atlas/creator_pipeline (this package)"]
+        Planner["PipelinePlanner"]
+        Orchestrator["CreatorPipelineOrchestrator"]
+        Stages["18 Stage Coordinators"]
+    end
+
+    subgraph Below["Existing Atlas systems (injected)"]
+        Collab["Collaboration"]
+        Workforce["Workforce"]
+        Brain["Brain"]
+        Execution["Execution Engine"]
+        Runtime["Runtime"]
+        Providers["Providers / MCP"]
+        Memory["Memory / Knowledge"]
+        Artifacts["Artifact Manager"]
+    end
+
+    Goal --> Orchestrator
+    Orchestrator --> Planner
+    Orchestrator --> Stages
+    Stages -.->|callbacks| Below
+```
+
+### Modules
+
+| Module | Responsibility |
+|--------|----------------|
+| `models.py` | Frozen dataclasses + enums (leaf of DAG) |
+| `planner.py` | `PipelinePlanner` — goal → 18-stage dependency graph |
+| `research.py` | `ResearchCoordinator` — research stage |
+| `script.py` | `ScriptCoordinator` — script writing stage |
+| `storyboard.py` | `StoryboardCoordinator` — storyboard generation |
+| `assets.py` | `AssetsCoordinator` — image/video generation |
+| `voice.py` | `VoiceCoordinator` — voice synthesis |
+| `timeline.py` | `TimelineCoordinator` — timeline assembly |
+| `render.py` | `RenderCoordinator` — dispatch to HyperFrames/Remotion/OpenMontage |
+| `review.py` | `ReviewCoordinator` — quality review |
+| `publisher.py` | `PublisherCoordinator` — upload package preparation |
+| `orchestrator.py` | `CreatorPipelineOrchestrator` — top-level facade |
+
+### Features
+
+* **Parallel stages** — stages with no dependencies run in parallel groups.
+* **Dependency graph** — the planner resolves stage dependencies and topologically sorts them.
+* **Resume** — `resume_project()` restarts a paused or failed project.
+* **Checkpointing** — `checkpoint()` / `restore()` for state persistence.
+* **Artifact tracking** — every stage's output is recorded as a `PipelineArtifact`.
+* **Streaming events** — `run(stream=True)` yields events as a generator.
+* **Failure recovery** — `retry_stage()` resets a failed stage to pending.
+* **Quality scoring** — stages record quality scores; reports aggregate them.
+* **Cost estimation** — each stage tracks `cost_usd`; results total them.
+* **Time estimation** — each stage tracks `duration_seconds`; results total them.
+
+### Usage
+
+```python
+from atlas.creator_pipeline import CreatorPipelineOrchestrator
+
+orch = CreatorPipelineOrchestrator()
+project = orch.create_project("Create a YouTube documentary about SpaceX")
+result = orch.run(project.id)
+print(f"Completed {result.stages_completed}/{len(project.stages)} stages")
+report = orch.generate_report(project.id)
+```
+
+### Test coverage
+
+86 dedicated tests in `tests/test_creator_pipeline.py`. See [`docs/creator_pipeline.md`](docs/creator_pipeline.md) for full documentation with Mermaid diagrams.
+
+
 ## Getting Started
 
 1. **Read the identity.** Start with [`atlas/core/Identity.md`](atlas/core/Identity.md) to understand who Atlas is.
