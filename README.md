@@ -2366,6 +2366,190 @@ The phase ships **92 dedicated tests** in `tests/test_pipeline.py`, covering:
 * No-circular-imports test (pipeline must not import `atlas.app`).
 
 
+## Phase 4 — Atlas Autonomous Workforce
+
+The `atlas/workforce/` package is a **completely new layer** that sits ABOVE the Brain in the Atlas stack. It orchestrates autonomous AI employees (workers) that collaborate on shared goals, delegate tasks, escalate problems, resolve conflicts, and learn from experience.
+
+### Architecture
+
+```mermaid
+flowchart TB
+    subgraph User["User"]
+        Goal["High-level goal"]
+    end
+
+    subgraph Workforce["atlas/workforce (this package)"]
+        Orchestrator["WorkforceOrchestrator"]
+        Manager["WorkforceManager"]
+        Workers["Workers (17 roles)"]
+        Teams["Teams"]
+        Planning["PlanningEngine"]
+        Coordination["CoordinationEngine"]
+        Delegation["DelegationEngine"]
+        Review["ReviewEngine"]
+        Learning["LearningEngine"]
+        Supervisor["Supervisor"]
+        Scheduler["Scheduler"]
+        Comms["CommunicationChannel"]
+        Metrics["MetricsCollector"]
+        Reports["ReportGenerator"]
+    end
+
+    subgraph Brain["atlas/intelligence (existing)"]
+        BrainEngine["Brain.think()"]
+    end
+
+    subgraph Execution["atlas/execution (existing)"]
+        ExecEngine["ExecutionEngine.run()"]
+    end
+
+    subgraph Runtime["atlas/runtime (existing)"]
+        RuntimeEngine["Runtime.handle()"]
+    end
+
+    subgraph Subsystems["Providers / MCP / Workflows / Memory / Knowledge"]
+        Providers["Providers"]
+        MCP["MCP"]
+        Workflows["Workflows"]
+        Memory["Memory"]
+        Knowledge["Knowledge"]
+    end
+
+    Goal --> Orchestrator
+    Orchestrator --> Manager
+    Manager --> Workers
+    Manager --> Teams
+    Orchestrator --> Planning
+    Orchestrator --> Coordination
+    Orchestrator --> Delegation
+    Orchestrator --> Review
+    Orchestrator --> Learning
+    Orchestrator --> Supervisor
+    Orchestrator --> Scheduler
+    Orchestrator --> Comms
+    Orchestrator --> Metrics
+    Orchestrator --> Reports
+
+    Workers -.->|think_fn callback| Brain
+    Brain --> Execution
+    Execution --> Runtime
+    Runtime --> Subsystems
+```
+
+### Worker roles
+
+The workforce ships 17 specialised roles, grouped by function:
+
+| Group | Roles |
+|-------|-------|
+| **Executive** | CEO, CTO |
+| **Engineering** | Software Engineer, Research Engineer, Mining Engineer, DevOps Engineer |
+| **Creative** | UI Designer, Video Creator, Technical Writer |
+| **Quality** | QA Engineer |
+| **Operations** | Project Manager |
+| **Specialists** | Knowledge Specialist, Memory Specialist, Vision Specialist |
+| **Agents** | Browser Agent, GitHub Agent, Blender Artist |
+
+Each role has default skills, a chain-of-command rank, and capability flags (`can_review`, `can_approve`, `can_delegate`, `can_lead_team`).
+
+### Dependency injection everywhere
+
+Workers **never** import Brain, Execution, Providers, or any Atlas subsystem directly. They receive a `think_fn` callable (typically `Brain.think`) at construction time:
+
+```python
+from atlas.intelligence.brain import Brain
+from atlas.workforce import WorkforceOrchestrator
+
+brain = Brain()
+orchestrator = WorkforceOrchestrator(think_fn=brain.think)
+```
+
+This keeps the workforce package fully decoupled from every concrete subsystem — a dedicated test (`test_no_brain_import`) walks the package source and verifies no `from atlas.<subsystem>` imports exist (the only sanctioned bridge is the `has_brain()` lazy-import helper in `__init__.py`).
+
+### Modules
+
+| Module | Responsibility |
+|--------|----------------|
+| `models.py` | Frozen dataclasses + enums (leaf of the dependency DAG) |
+| `roles.py` | Role definitions, default skills, chain of command |
+| `worker.py` | `Worker` class — lifecycle, memory, task execution |
+| `team.py` | `TeamManager` — team lifecycle and membership |
+| `manager.py` | `WorkforceManager` — owns all workers + teams |
+| `orchestrator.py` | `WorkforceOrchestrator` — goal → team → tasks → execute → review → report |
+| `communication.py` | `CommunicationChannel` — worker-to-worker messaging |
+| `delegation.py` | `DelegationEngine` — autonomous delegation (respects chain of command) |
+| `planning.py` | `PlanningEngine` — goal → task decomposition + dependency ordering |
+| `coordination.py` | `CoordinationEngine` — shared workspace, handoffs, dependencies |
+| `review.py` | `ReviewEngine` — quality review + approvals |
+| `learning.py` | `LearningEngine` — worker skill improvement from lessons |
+| `supervisor.py` | `Supervisor` — oversight, escalation, conflict resolution, intervention |
+| `scheduler.py` | `Scheduler` — shifts + load-balancing task assignment |
+| `metrics.py` | `MetricsCollector` — per-worker + team productivity metrics |
+| `reports.py` | `ReportGenerator` — workforce-wide reports |
+
+### Capabilities
+
+* **Autonomous delegation** — workers delegate tasks to peers via `DelegationEngine.delegate()`, respecting the chain of command (no upward delegation — use `Supervisor.escalate()` instead).
+* **Multi-agent collaboration** — workers communicate via `CommunicationChannel` with direct messages, team broadcasts, reply threads, and handoffs.
+* **Task assignment** — the `Scheduler.pick_worker()` method selects the best idle worker for a task based on role requirements, skill requirements, and load balancing (fewest completed tasks first).
+* **Worker specialisation** — each role has default skills; workers can be created with custom skills; `meets_requirements()` checks role + skill fit.
+* **Team creation** — `WorkforceManager.create_team()` creates permanent or temporary teams with a lead and members.
+* **Temporary workers** — `hire_temporary()` and `hire_agent()` create workers with `WorkerKind.TEMPORARY` for short-lived tasks.
+* **Worker lifecycle** — offline → idle → busy → paused → stopped → error, with `start()`, `stop()`, `pause()`, `resume()`, `mark_error()`.
+* **Worker memory** — each worker has a personal `WorkerMemory` (capacity-bounded, immutable updates) separate from the global Atlas Memory Engine.
+* **Worker communication** — `CommunicationChannel` supports info, request, response, update, approval_request/granted/denied, escalation, handoff, and broadcast message kinds.
+* **Shared workspace** — `CoordinationEngine` manages artifact publishing, dependency tracking, and handoff recording.
+* **Approvals** — `ReviewEngine.request_approval()` / `grant_approval()` / `deny_approval()` for gated decisions.
+* **Escalation** — `Supervisor.escalate()` with four severity levels (low, medium, high, critical).
+* **Conflict resolution** — `Supervisor.report_conflict()` / `resolve_conflict()` with five resolution strategies (mediated, escalated, auto_resolved, deferred, split).
+* **Quality review** — `ReviewEngine.submit_review()` with four verdicts (approved, rejected, changes_requested, deferred) and `apply_verdict()` for task status transitions.
+* **Productivity metrics** — `MetricsCollector` computes per-worker and per-team metrics: tasks assigned/completed/failed, average quality, average duration, artifacts, delegations, escalations.
+* **Execution history** — `MetricsCollector` records every task state; `ReportGenerator` produces `WorkforceReport` snapshots.
+
+### Usage
+
+```python
+from atlas.workforce import WorkforceOrchestrator
+
+# Build the orchestrator (optionally wire in Brain.think)
+orchestrator = WorkforceOrchestrator()
+
+# Hire the default workforce (17 roles)
+orchestrator.hire_default_workforce()
+
+# Execute a goal end-to-end
+report = orchestrator.execute_goal("Build a hello world app")
+
+print(f"Workers: {report.total_workers}")
+print(f"Tasks: {report.total_tasks}")
+print(f"Completed: {report.completed_tasks}")
+print(f"Quality: {report.average_quality:.2f}")
+```
+
+### Test coverage
+
+The phase ships **269 dedicated tests** in `tests/test_workforce.py`, covering:
+
+* All 11 enums and 20+ frozen dataclasses.
+* All 17 worker roles and their default skills.
+* Worker lifecycle, memory, skill checks, and task execution (with and without `think_fn`).
+* CommunicationChannel (send, broadcast, request, respond, handoff, threads, read tracking).
+* DelegationEngine (delegate, accept, reject, chain-of-command enforcement, acceptance rate).
+* PlanningEngine (decompose, dependency ordering, critical path).
+* CoordinationEngine (artifacts, dependencies, handoffs, blocked detection).
+* ReviewEngine (reviews, approvals, verdicts, quality averages).
+* LearningEngine (lessons, skill boosting, cap at 1.0, pending application).
+* Supervisor (escalations, conflicts, intervention, resolution).
+* Scheduler (shifts, worker picking, load balancing, balance score).
+* MetricsCollector (per-worker, per-team, top/bottom performers, completion rate).
+* ReportGenerator (report generation, summary, top workers).
+* TeamManager (membership, lead, disband/reactivate, online/available members).
+* WorkforceManager (hire, fire, teams, bulk operations).
+* WorkforceOrchestrator (full goal execution, status, engine wiring).
+* End-to-end integration scenarios (delegation, escalation, conflict resolution, review, learning).
+* A no-brain-import test that walks the package source to verify no Atlas-subsystem imports.
+
+
 ## Getting Started
 
 1. **Read the identity.** Start with [`atlas/core/Identity.md`](atlas/core/Identity.md) to understand who Atlas is.
