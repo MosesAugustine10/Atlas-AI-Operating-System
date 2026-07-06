@@ -2634,6 +2634,85 @@ report = orch.generate_report(project.id)
 86 dedicated tests in `tests/test_creator_pipeline.py`. See [`docs/creator_pipeline.md`](docs/creator_pipeline.md) for full documentation with Mermaid diagrams.
 
 
+## Phase 8 — Atlas Evaluation & Self-Improvement
+
+The `atlas/evaluation/` package is the **production-grade evaluation and self-improvement system**. It sits ABOVE the Brain and Workforce, running repeatable benchmarks, scoring outputs across seven dimensions, detecting regressions between versions, and generating optimization suggestions.
+
+### Architecture
+
+The evaluation package NEVER imports Brain, Workforce, or any Atlas subsystem directly — it receives a `run_fn` callback via dependency injection.
+
+```mermaid
+flowchart TB
+    subgraph Eval["atlas/evaluation"]
+        Orchestrator["EvaluationOrchestrator"]
+        Scenarios["ScenarioStore (10 built-ins)"]
+        Benchmarks["BenchmarkSuite"]
+        Runner["EvaluationRunner"]
+        Scoring["ScoringEngine (7 dimensions)"]
+        Regression["RegressionDetector"]
+        Optimizer["Optimizer (9 suggestion kinds)"]
+        Dashboard["DashboardGenerator"]
+    end
+
+    subgraph Below["Existing systems (injected)"]
+        Brain["Brain / Pipeline"]
+    end
+
+    Orchestrator --> Scenarios
+    Orchestrator --> Benchmarks
+    Orchestrator --> Runner
+    Runner --> Scoring
+    Orchestrator --> Regression
+    Orchestrator --> Optimizer
+    Orchestrator --> Dashboard
+    Runner -.->|run_fn| Below
+```
+
+### Scoring Dimensions
+
+| Dimension | Weight | Metrics |
+|-----------|--------|---------|
+| Execution | 20% | success, completeness, error/retry counts |
+| Reasoning | 15% | coherence, depth, accuracy, step count |
+| Quality | 25% | relevance, clarity, completeness, correctness |
+| Cost | 10% | tokens in/out, estimated cost, efficiency |
+| Latency | 10% | duration, first-token time, throughput |
+| Memory | 10% | entries stored/recalled, recall accuracy |
+| Knowledge | 10% | docs indexed/retrieved, relevance, citations |
+
+### Modules
+
+| Module | Responsibility |
+|--------|----------------|
+| `models.py` | Frozen dataclasses + enums (leaf of DAG) |
+| `scenarios.py` | `ScenarioStore` with 10 built-in scenarios |
+| `benchmark.py` | `BenchmarkSuite` for named scenario collections |
+| `runner.py` | `EvaluationRunner` executing benchmarks via `run_fn` |
+| `scoring.py` | `ScoringEngine` — 7-dimensional weighted scoring |
+| `regression.py` | `RegressionDetector` comparing runs |
+| `optimizer.py` | `Optimizer` generating 9 kinds of suggestions |
+| `dashboard.py` | `DashboardGenerator` for UI-ready reports |
+| `orchestrator.py` | `EvaluationOrchestrator` (evaluate/benchmark/compare/improve) |
+
+### Usage
+
+```python
+from atlas.evaluation import EvaluationOrchestrator
+
+orch = EvaluationOrchestrator()
+orch.load_builtin_scenarios()
+benchmark = orch.create_full_benchmark()
+run = orch.benchmark(benchmark, version="1.0.0")
+print(f"Overall score: {run.overall_score:.2f}")
+opt = orch.improve(run.id)
+```
+
+### Test coverage
+
+106 dedicated tests in `tests/test_evaluation.py`. See [`docs/evaluation.md`](docs/evaluation.md) for full documentation with Mermaid diagrams.
+
+
 ## Getting Started
 
 1. **Read the identity.** Start with [`atlas/core/Identity.md`](atlas/core/Identity.md) to understand who Atlas is.
