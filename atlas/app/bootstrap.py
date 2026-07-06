@@ -95,9 +95,56 @@ class AtlasApp:
         self.agents = agents
         self.artifacts = artifacts
         self.system = system
+        # The live pipeline (set by with_pipeline, otherwise None)
+        self.pipeline: Any = None
         # Qt objects (built lazily)
         self._qt_app: Any = None
         self._main_window: Any = None
+
+    # ------------------------------------------------------------------
+    # Live pipeline construction
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def with_pipeline(
+        cls,
+        api_keys: dict[str, str | None] | None = None,
+        register_providers: bool = True,
+    ) -> AtlasApp:
+        """Build an :class:`AtlasApp` wired with the real live pipeline.
+
+        This is the recommended way to construct the production Atlas
+        application. It calls :func:`~atlas.pipeline.build_pipeline`
+        and passes the resulting subsystems to the constructor, so
+        ``brain.think(goal)`` actually executes.
+
+        Parameters:
+            api_keys: Optional dict mapping provider names to API keys.
+                When omitted, keys are read from environment variables.
+            register_providers: When ``True`` (default), register every
+                real provider with the ProviderManager.
+
+        Returns:
+            A fully-wired :class:`AtlasApp` with ``app.pipeline`` set
+            to the :class:`~atlas.pipeline.Pipeline`.
+        """
+        from atlas.pipeline import build_pipeline
+
+        pipeline = build_pipeline(
+            register_providers=register_providers,
+            api_keys=api_keys,
+        )
+        app = cls(
+            brain=pipeline.brain,
+            providers=pipeline.providers,
+            mcp=pipeline.mcp,
+            memory=pipeline.memory,
+            knowledge=pipeline.knowledge,
+        )
+        app.pipeline = pipeline
+        # Also wire execution controller with the real brain
+        app.controllers["execution"] = ExecutionController(brain=pipeline.brain)
+        return app
 
     # ------------------------------------------------------------------
     # Controller access

@@ -33,8 +33,10 @@ class ProviderManager:
         registry: ProviderRegistry | None = None,
         router: ProviderRouter | None = None,
     ) -> None:
-        self.registry = registry or ProviderRegistry()
-        self.router = router or ProviderRouter(self.registry)
+        # NOTE: explicit ``is None`` check because ProviderRegistry defines
+        # ``__len__`` and would be falsy when empty.
+        self.registry = registry if registry is not None else ProviderRegistry()
+        self.router = router if router is not None else ProviderRouter(self.registry)
         self.logger = get_logger("provider.manager")
 
     def register(

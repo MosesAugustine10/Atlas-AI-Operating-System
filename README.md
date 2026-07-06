@@ -2266,6 +2266,106 @@ The `atlas/app/` package does **not** duplicate any backend logic. It only:
 A dedicated test (`test_import_app_does_not_import_other_subsystems`) walks the package source and verifies no `from atlas.<subsystem>` imports exist — only `atlas.studio` (controllers + models + navigation) is allowed.
 
 
+## Phase 2 — Real AI Pipeline
+
+The `atlas/pipeline/` package is the **single composition root** that wires every Atlas subsystem into one live execution pipeline. `brain.think(goal)` actually executes tasks — no placeholders, no stubs.
+
+### What's in this phase
+
+* **`Pipeline`** (`atlas/pipeline/__init__.py`) — the live pipeline that owns every subsystem instance and exposes `think()`, `think_stream()`, and `generate()`.
+* **`build_pipeline()`** — the factory that constructs a fully-wired pipeline with real (or deterministic-fallback) subsystems.
+* **6 real HTTP-calling providers** in `atlas/providers/real/`:
+  * `RealOpenAIProvider` — OpenAI Chat Completions API
+  * `RealAnthropicProvider` — Anthropic Messages API
+  * `RealGeminiProvider` — Google Gemini Generate Content API
+  * `RealOpenRouterProvider` — OpenRouter Chat Completions API
+  * `RealOllamaProvider` — Ollama local API
+  * `RealZAIProvider` — Z.ai GLM API
+* **`AtlasApp.with_pipeline()`** — wires the live pipeline into the Qt application so `brain.think()` is used for real.
+
+### The live execution pipeline
+
+```
+brain.think(goal)
+    → Brain (12-stage pipeline)
+        1.  Understand Goal      → GoalManager.create()
+        2.  Search Knowledge     → Coordinator → KnowledgeEngine.search()
+        3.  Recall Memory        → Coordinator → MemoryEngine.recall()
+        4.  Reason               → Reasoner.reason()
+        5.  Plan                 → AdaptivePlanner.plan()
+        6.  Choose               → DecisionEngine.decide()
+        7.  Execute              → Coordinator → ExecutionEngine.run(goal)
+                                    → ExecutionPlanner → ExecutionDispatcher
+                                    → ExecutionExecutor
+                                        → ProviderManager.generate()  (real LLM call)
+                                        → MCPManager.execute_capability()  (real tool call)
+        8.  Review               → Critic.critique()
+        9.  Reflect              → ReflectionEngine.reflect()
+        10. Learn                → LearningEngine.learn()
+        11. Update Memory        → Coordinator → MemoryEngine.remember(outcome)
+        12. Return               → ExecutionOutcome
+```
+
+### Provider fallback mode
+
+Every real provider makes actual HTTP calls when an API key is present and falls back to deterministic mode when no key is available. This means:
+
+* **With API keys** (production): real LLM responses from OpenAI, Anthropic, Gemini, etc.
+* **Without API keys** (tests / air-gapped): deterministic fake responses so the pipeline always works.
+
+API keys are read from environment variables (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `ZAI_API_KEY`) or passed explicitly via `build_pipeline(api_keys={...})`.
+
+### Usage
+
+```python
+from atlas.pipeline import build_pipeline
+
+# Build the live pipeline (reads API keys from env vars)
+pipeline = build_pipeline()
+
+# brain.think(goal) actually executes
+outcome = pipeline.think("Write a hello world program")
+print(outcome.status)        # completed
+print(outcome.duration_seconds)
+print(outcome.result)        # ExecutionReport
+
+# Stream live events
+for event in pipeline.think_stream("Write a poem"):
+    print(event["event"], event["data"])
+
+# Direct provider access (bypass the brain)
+response = pipeline.generate("Hello", model="gpt-4o-mini")
+```
+
+### Wiring into the Qt app
+
+```python
+from atlas.app import AtlasApp
+
+# Build the Qt app with the real pipeline wired in
+app = AtlasApp.with_pipeline()
+# app.pipeline is the live Pipeline
+# app.brain is the real Brain
+# app.providers is the real ProviderManager (6 providers registered)
+app.run()  # enters the Qt event loop
+```
+
+### Test coverage
+
+The phase ships **92 dedicated tests** in `tests/test_pipeline.py`, covering:
+
+* Pipeline construction (all subsystems present, 6 providers registered).
+* `Pipeline.think()` — real execution, returns `ExecutionOutcome`, writes to memory.
+* `Pipeline.think_stream()` — streaming events (start, knowledge, memory, plan, execute, review, complete).
+* `Pipeline.generate()` — direct provider access.
+* All 6 real providers in fallback mode (no API key).
+* All 6 real providers in HTTP mode (mocked `http_post_json` verifying correct payloads, headers, and response parsing).
+* `AtlasApp.with_pipeline()` integration (brain, providers, memory, knowledge, mcp all wired).
+* End-to-end scenarios (full execution, memory persistence across thinks, streaming + think consistency, knowledge ingest).
+* Environment-variable key resolution.
+* No-circular-imports test (pipeline must not import `atlas.app`).
+
+
 ## Getting Started
 
 1. **Read the identity.** Start with [`atlas/core/Identity.md`](atlas/core/Identity.md) to understand who Atlas is.
