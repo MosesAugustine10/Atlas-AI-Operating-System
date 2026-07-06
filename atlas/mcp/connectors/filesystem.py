@@ -80,6 +80,9 @@ class FilesystemConnector(BaseConnector):
             if max_file_size_mb is not None
             else cfg.get("max_file_size_mb", 100)
         )
+        # Undo stack for write/delete operations (stores backup content)
+        self._undo_stack: list[dict[str, Any]] = []
+        self._max_undo: int = 50
         super().__init__(
             name="filesystem",
             description=(
@@ -164,6 +167,21 @@ class FilesystemConnector(BaseConnector):
                     description="Path utilities",
                     permissions=("read",),
                 ),
+                MCPCapability(
+                    name="file.index",
+                    description="Recursively index a project directory",
+                    permissions=("read",),
+                ),
+                MCPCapability(
+                    name="file.undo",
+                    description="Undo the last write/delete operation",
+                    permissions=("write",),
+                ),
+                MCPCapability(
+                    name="file.git_info",
+                    description="Git-aware file info (ignored, tracked, modified)",
+                    permissions=("read",),
+                ),
             ),
             metadata={
                 "root": str(self.root),
@@ -243,6 +261,12 @@ class FilesystemConnector(BaseConnector):
             return self._extract(params)
         if cap == "file.path":
             return self._path_utilities(params)
+        if cap == "file.index":
+            return self._index_project(params)
+        if cap == "file.undo":
+            return self._undo(params)
+        if cap == "file.git_info":
+            return self._git_aware_info(params)
         raise ValueError(f"Unknown capability: {cap!r}")
 
     # ------------------------------------------------------------------
@@ -289,6 +313,14 @@ class FilesystemConnector(BaseConnector):
         path = self._resolve(params.get("path", ""))
         content = params.get("content", "")
         binary = params.get("binary", False)
+        # Push undo entry: backup existing content
+        old_content = ""
+        if path.exists() and path.is_file():
+            try:
+                old_content = path.read_text(encoding=self.encoding)
+            except Exception:  # noqa: BLE001
+                old_content = ""
+        self._push_undo({"op": "write", "path": str(path), "old_content": old_content})
         path.parent.mkdir(parents=True, exist_ok=True)
         if binary:
             data = params.get("data", b"")
@@ -348,6 +380,13 @@ class FilesystemConnector(BaseConnector):
         recursive = params.get("recursive", True)
         if not path.exists():
             return {"path": str(path), "deleted": False, "reason": "not found"}
+        # Push undo entry: backup file content (for files only)
+        if path.is_file():
+            try:
+                content = path.read_text(encoding=self.encoding)
+                self._push_undo({"op": "delete", "path": str(path), "content": content})
+            except Exception:  # noqa: BLE001
+                pass
         if path.is_dir():
             if recursive:
                 shutil.rmtree(path)
@@ -495,6 +534,251 @@ class FilesystemConnector(BaseConnector):
         if op == "parts":
             return {"path": str(path), "parts": list(path.parts)}
         raise ValueError(f"unknown path op: {op!r}")
+
+    # ------------------------------------------------------------------
+    # Recursive project indexing
+    # ------------------------------------------------------------------
+
+    def _index_project(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Recursively index a project directory.
+
+        Returns a tree of files and directories with metadata.
+        Respects .gitignore when available.
+        """
+        path = self._resolve(params.get("path", "."))
+        max_depth = params.get("max_depth", 10)
+        if not path.exists():
+            raise FileNotFoundError(f"path not found: {path}")
+        if not path.is_dir():
+            raise NotADirectoryError(f"not a directory: {path}")
+
+        # Load .gitignore patterns
+        ignore_patterns = self._load_gitignore(path)
+
+        def _index_dir(dir_path: Path, depth: int) -> dict[str, Any]:
+            if depth > max_depth:
+                return {"name": dir_path.name, "type": "dir", "truncated": True}
+            entries: list[dict[str, Any]] = []
+            try:
+                for entry in sorted(dir_path.iterdir()):
+                    rel = entry.relative_to(path)
+                    # Check gitignore
+                    if self._is_ignored(rel, ignore_patterns):
+                        continue
+                    if entry.is_dir():
+                        if entry.name in (
+                            "__pycache__",
+                            ".git",
+                            "node_modules",
+                            ".venv",
+                        ):
+                            continue
+                        entries.append(_index_dir(entry, depth + 1))
+                    elif entry.is_file():
+                        stat = entry.stat()
+                        entries.append(
+                            {
+                                "name": entry.name,
+                                "type": "file",
+                                "size": stat.st_size,
+                                "modified": datetime.fromtimestamp(
+                                    stat.st_mtime, UTC
+                                ).isoformat(),
+                                "suffix": entry.suffix,
+                            }
+                        )
+            except PermissionError:
+                pass
+            file_count = sum(1 for e in entries if e.get("type") == "file")
+            dir_count = sum(1 for e in entries if e.get("type") == "dir")
+            return {
+                "name": dir_path.name,
+                "type": "dir",
+                "entries": entries,
+                "file_count": file_count,
+                "dir_count": dir_count,
+            }
+
+        tree = _index_dir(path, 0)
+        total_files = self._count_files(tree)
+        total_dirs = self._count_dirs(tree)
+        return {
+            "path": str(path),
+            "tree": tree,
+            "total_files": total_files,
+            "total_dirs": total_dirs,
+        }
+
+    @staticmethod
+    def _load_gitignore(root: Path) -> list[str]:
+        """Load .gitignore patterns from ``root``."""
+        gitignore = root / ".gitignore"
+        if not gitignore.exists():
+            return []
+        try:
+            lines = gitignore.read_text().splitlines()
+            return [
+                line.strip()
+                for line in lines
+                if line.strip() and not line.startswith("#")
+            ]
+        except Exception:  # noqa: BLE001
+            return []
+
+    @staticmethod
+    def _is_ignored(rel_path: Path, patterns: list[str]) -> bool:
+        """Check if ``rel_path`` matches any gitignore pattern."""
+        if not patterns:
+            return False
+        name = rel_path.name
+        parts = rel_path.parts
+        for pattern in patterns:
+            if pattern == name:
+                return True
+            if pattern in parts:
+                return True
+            if pattern.endswith("/*") and len(parts) > 0:
+                if pattern[:-2] in parts:
+                    return True
+            if pattern.startswith("*"):
+                suffix = pattern[1:]
+                if name.endswith(suffix):
+                    return True
+        return False
+
+    @staticmethod
+    def _count_files(node: dict[str, Any]) -> int:
+        """Count files in an index tree."""
+        count = node.get("file_count", 0)
+        for entry in node.get("entries", []):
+            if entry.get("type") == "dir":
+                count += FilesystemConnector._count_files(entry)
+        return count
+
+    @staticmethod
+    def _count_dirs(node: dict[str, Any]) -> int:
+        """Count directories in an index tree."""
+        count = node.get("dir_count", 0)
+        for entry in node.get("entries", []):
+            if entry.get("type") == "dir":
+                count += 1 + FilesystemConnector._count_dirs(entry)
+        return count
+
+    # ------------------------------------------------------------------
+    # Undo
+    # ------------------------------------------------------------------
+
+    def _push_undo(self, entry: dict[str, Any]) -> None:
+        """Push an undo entry onto the stack."""
+        self._undo_stack.append(entry)
+        if len(self._undo_stack) > self._max_undo:
+            self._undo_stack = self._undo_stack[-self._max_undo :]
+
+    def _undo(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Undo the last write/delete operation."""
+        if not self._undo_stack:
+            return {"undone": False, "reason": "undo stack is empty"}
+        entry = self._undo_stack.pop()
+        op = entry.get("op", "")
+        path_str = entry.get("path", "")
+        if not path_str:
+            return {"undone": False, "reason": "no path in undo entry"}
+        path = Path(path_str)
+        try:
+            if op == "write":
+                old_content = entry.get("old_content", "")
+                if old_content:
+                    path.write_text(old_content, encoding=self.encoding)
+                    return {"undone": True, "op": "write", "path": str(path)}
+                elif path.exists():
+                    path.unlink()
+                    return {
+                        "undone": True,
+                        "op": "write",
+                        "path": str(path),
+                        "deleted": True,
+                    }
+                return {"undone": False, "reason": "nothing to undo"}
+            if op == "delete":
+                content = entry.get("content", "")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding=self.encoding)
+                return {"undone": True, "op": "delete", "path": str(path)}
+        except Exception as exc:  # noqa: BLE001
+            return {"undone": False, "reason": str(exc)}
+        return {"undone": False, "reason": f"unknown op: {op}"}
+
+    def undo_stack_size(self) -> int:
+        """Return the number of undoable operations."""
+        return len(self._undo_stack)
+
+    # ------------------------------------------------------------------
+    # Git-aware operations
+    # ------------------------------------------------------------------
+
+    def _git_aware_info(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return git-aware information about a file or directory.
+
+        Checks whether the path is in a git repo, whether it's tracked,
+        ignored, or modified.
+        """
+        path = self._resolve(params.get("path", "."))
+        info: dict[str, Any] = {
+            "path": str(path),
+            "exists": path.exists(),
+            "is_file": path.is_file() if path.exists() else False,
+            "is_dir": path.is_dir() if path.exists() else False,
+        }
+        # Find the git root
+        git_root = self._find_git_root(path)
+        info["in_git_repo"] = git_root is not None
+        if git_root:
+            info["git_root"] = str(git_root)
+            rel = path.relative_to(git_root) if path.is_absolute() else path
+            # Check if ignored
+            ignore_patterns = self._load_gitignore(git_root)
+            info["git_ignored"] = self._is_ignored(rel, ignore_patterns)
+            # Check git status
+            try:
+                import git  # type: ignore[import-not-found]
+
+                repo = git.Repo(str(git_root))
+                # Check if tracked
+                tracked_files = set(
+                    item[0] if isinstance(item, (list, tuple)) else str(item)
+                    for item in repo.index.entries
+                )
+                rel_str = str(rel).replace("\\", "/")
+                info["git_tracked"] = rel_str in tracked_files
+                # Check if modified
+                if path.is_file():
+                    info["git_modified"] = rel_str in [
+                        item.a_path for item in repo.index.diff(None)
+                    ]
+                else:
+                    info["git_modified"] = False
+                # Current branch
+                info["git_branch"] = (
+                    repo.active_branch.name if not repo.head.is_detached else "detached"
+                )
+            except Exception:  # noqa: BLE001
+                info["git_tracked"] = False
+                info["git_modified"] = False
+                info["git_branch"] = ""
+        return info
+
+    @staticmethod
+    def _find_git_root(path: Path) -> Path | None:
+        """Walk up from ``path`` to find the nearest .git directory."""
+        current = path.resolve()
+        if current.is_file():
+            current = current.parent
+        while True:
+            if (current / ".git").exists():
+                return current
+            if current.parent == current:
+                return None
+            current = current.parent
 
 
 __all__ = ["FilesystemConnector"]

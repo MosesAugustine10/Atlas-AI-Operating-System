@@ -146,6 +146,26 @@ class GitHubConnector(BaseConnector):
                     permissions=("read", "write"),
                 ),
                 MCPCapability(
+                    name="git.stash",
+                    description="Stash / pop / list stashes",
+                    permissions=("write",),
+                ),
+                MCPCapability(
+                    name="git.merge",
+                    description="Merge a branch",
+                    permissions=("write",),
+                ),
+                MCPCapability(
+                    name="git.blame",
+                    description="Show blame for a file",
+                    permissions=("read",),
+                ),
+                MCPCapability(
+                    name="git.rollback",
+                    description="Rollback to a previous commit",
+                    permissions=("write",),
+                ),
+                MCPCapability(
                     name="repo.list",
                     description="List repositories (REST)",
                     permissions=("read",),
@@ -257,6 +277,14 @@ class GitHubConnector(BaseConnector):
             return self._tag(params)
         if cap == "git.remote":
             return self._remote(params)
+        if cap == "git.stash":
+            return self._stash(params)
+        if cap == "git.merge":
+            return self._merge(params)
+        if cap == "git.blame":
+            return self._blame(params)
+        if cap == "git.rollback":
+            return self._rollback(params)
         # REST API operations (token required)
         if cap == "repo.list":
             return self._rest_list_repos(params)
@@ -439,6 +467,73 @@ class GitHubConnector(BaseConnector):
             repo.delete_remote(name)
             return {"removed": name}
         raise ValueError(f"unknown remote op: {op!r}")
+
+    def _stash(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Stash, pop, or list stashes."""
+        repo = self._get_repo(params)
+        op = params.get("op", "push")
+        if op == "push":
+            msg = params.get("message", "")
+            repo.git.stash("push", "-m", msg) if msg else repo.git.stash("push")
+            return {"stashed": True, "message": msg}
+        if op == "pop":
+            repo.git.stash("pop")
+            return {"popped": True}
+        if op == "list":
+            stashes = list(repo.git.stash("list").splitlines())
+            return {"stashes": stashes, "count": len(stashes)}
+        if op == "drop":
+            index = params.get("index", 0)
+            repo.git.stash("drop", str(index))
+            return {"dropped": True, "index": index}
+        raise ValueError(f"unknown stash op: {op!r}")
+
+    def _merge(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Merge a branch into the current branch."""
+        repo = self._get_repo(params)
+        branch = params.get("branch", "")
+        if not branch:
+            raise ValueError("branch is required for merge")
+        no_ff = params.get("no_ff", False)
+        if no_ff:
+            repo.git.merge("--no-ff", branch)
+        else:
+            repo.git.merge(branch)
+        return {"merged": True, "branch": branch}
+
+    def _blame(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Show blame for a file."""
+        repo = self._get_repo(params)
+        file_path = params.get("file", "")
+        if not file_path:
+            raise ValueError("file is required for blame")
+        blame_output = repo.git.blame("--porcelain", file_path)
+        lines: list[dict[str, str]] = []
+        for line in blame_output.splitlines():
+            if line and not line.startswith("\t"):
+                parts = line.split()
+                if len(parts) >= 2:
+                    lines.append({"commit": parts[0], "line": parts[1]})
+        return {"file": file_path, "blame_lines": lines, "count": len(lines)}
+
+    def _rollback(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Rollback to a previous commit (git reset or revert)."""
+        repo = self._get_repo(params)
+        target = params.get("commit", "")
+        if not target:
+            raise ValueError("commit is required for rollback")
+        mode = params.get("mode", "soft")
+        if mode == "hard":
+            repo.git.reset("--hard", target)
+        elif mode == "soft":
+            repo.git.reset("--soft", target)
+        elif mode == "mixed":
+            repo.git.reset("--mixed", target)
+        elif mode == "revert":
+            repo.git.revert("--no-edit", target)
+        else:
+            raise ValueError(f"unknown rollback mode: {mode!r}")
+        return {"rolled_back": True, "commit": target, "mode": mode}
 
     # ------------------------------------------------------------------
     # REST API operations (token required)

@@ -1602,6 +1602,10 @@ class TestConnectors:
             os.unlink(tmp_path)
 
     def test_github_connector_execute(self) -> None:
+        try:
+            import git  # noqa: F401
+        except ImportError:
+            pytest.skip("GitPython not installed")
         c = GitHubConnector()
         c.connect()
         # Use a local git operation that doesn't require a token or network.
