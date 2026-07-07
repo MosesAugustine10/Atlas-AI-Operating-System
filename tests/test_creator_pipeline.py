@@ -705,7 +705,7 @@ class TestNoSubsystemImports:
                 if not fname.endswith(".py"):
                     continue
                 path = os.path.join(dirpath, fname)
-                with open(path) as f:
+                with open(path, encoding='utf-8') as f:
                     for lineno, line in enumerate(f, start=1):
                         if forbidden.match(line):
                             offenders.append(f"{path}:{lineno}: {line.rstrip()}")

@@ -1960,13 +1960,13 @@ class TestOrchestrator:
                 path = os.path.join(dirpath, fname)
                 # Allow the __init__.py has_brain() lazy import check
                 is_init = os.path.basename(path) == "__init__.py"
-                with open(path) as f:
+                with open(path, encoding='utf-8') as f:
                     for lineno, line in enumerate(f, start=1):
                         if forbidden.match(line):
                             if (
                                 is_init
                                 and "brain" in line
-                                and "has_brain" in open(path).read()
+                                and "has_brain" in open(path, encoding='utf-8').read()
                             ):
                                 # The has_brain() helper does a lazy import check — allowed
                                 continue
